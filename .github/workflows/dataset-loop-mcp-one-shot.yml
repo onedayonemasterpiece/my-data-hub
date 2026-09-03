@@ -1,0 +1,296 @@
+name: dataset-loop-mcp-one-shot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/one-shot-request.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dataset-loop-mcp-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for and verify the immutable private alpha.3 prerelease
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          gh auth status >/dev/null
+          deadline=$((SECONDS + 2700))
+          while :; do
+            if ref=$(gh api repos/onedayonemasterpiece/dataset-loop-mcp/git/ref/tags/v0.1.0-alpha.3 2>/dev/null); then
+              if [ "$(jq -r '.object.type' <<<"$ref")" = tag ]; then
+                tag_object=$(jq -r '.object.sha' <<<"$ref")
+                tag=$(gh api "repos/onedayonemasterpiece/dataset-loop-mcp/git/tags/$tag_object")
+                release=$(gh api repos/onedayonemasterpiece/dataset-loop-mcp/releases/tags/v0.1.0-alpha.3)
+                names=$(jq -r '.assets[].name' <<<"$release")
+                if [ "$(jq -r '.object.type' <<<"$tag")" = commit ] \
+                  && [ "$(jq -r '.prerelease' <<<"$release")" = true ] \
+                  && [ "$(jq -r '.draft' <<<"$release")" = false ] \
+                  && grep -qx 'dataset_loop_mcp-0.1.0a3-py3-none-any.whl' <<<"$names" \
+                  && grep -qx 'dataset_loop_mcp-0.1.0a3.tar.gz' <<<"$names" \
+                  && grep -qx 'SHA256SUMS' <<<"$names"; then
+                  break
+                fi
+              fi
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo 'alpha.3 prerelease did not become valid within 45 minutes' >&2
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "RELEASE_TAG_OBJECT_SHA=$tag_object" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT_SHA=$(jq -r '.object.sha' <<<"$tag")" >> "$GITHUB_ENV"
+          echo "RELEASE_ID=$(jq -r '.id' <<<"$release")" >> "$GITHUB_ENV"
+
+      - name: Perform a bounded fresh DevCoveer preflight
+        run: |
+          set -euo pipefail
+          test -s ops/dataset-loop-mcp/owner-delivery-public.pem
+          openssl pkey -pubin -in ops/dataset-loop-mcp/owner-delivery-public.pem -noout
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import shutil
+          import socket
+          import stat
+          import subprocess
+          from datetime import UTC, datetime
+
+          home = pathlib.Path.home().resolve()
+          root = pathlib.Path.cwd().resolve()
+
+          def run(argv: list[str]) -> tuple[int, str]:
+              try:
+                  result = subprocess.run(
+                      argv,
+                      text=True,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      timeout=30,
+                      check=False,
+                  )
+              except Exception as exc:
+                  return 255, type(exc).__name__
+              return result.returncode, result.stdout[:100_000]
+
+          commands = {
+              name: shutil.which(name) is not None
+              for name in (
+                  'gh', 'git', 'python3', 'systemctl', 'nginx', 'certbot',
+                  'yc', 'ss', 'sudo', 'openssl', 'curl', 'tar',
+              )
+          }
+          sudo_rc, _ = run(['sudo', '-n', 'true']) if commands['sudo'] else (127, '')
+          systemd_rc, _ = run(['systemctl', '--user', 'is-system-running']) if commands['systemctl'] else (127, '')
+
+          def port_free(port: int) -> bool:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.bind(('127.0.0.1', port))
+                  return True
+              except OSError:
+                  return False
+              finally:
+                  sock.close()
+
+          prior_path = home / '.local/state/dataset-loop-mcp/port'
+          prior = None
+          if prior_path.is_file():
+              try:
+                  prior = int(prior_path.read_text().strip())
+              except Exception:
+                  pass
+          candidates = ([prior] if prior else []) + list(range(8791, 8811))
+          port = next((value for value in candidates if value and port_free(value)), None)
+          if port is None and prior:
+              active_rc, _ = run(['systemctl', '--user', 'is-active', 'dataset-loop-mcp.service'])
+              if active_rc == 0:
+                  port = prior
+
+          edge_candidates: list[str] = []
+          for path in root.rglob('*'):
+              try:
+                  if not path.is_file() or path.is_symlink() or path.stat().st_size > 2_000_000:
+                      continue
+                  if '.git' in path.parts or path.suffix.casefold() not in {
+                      '.py', '.sh', '.conf', '.j2', '.jinja', '.tmpl', '.yaml', '.yml', '.toml'
+                  }:
+                      continue
+                  text = path.read_text(errors='ignore')
+              except OSError:
+                  continue
+              if 'mcp-datahub.kenigevents.ru' in text and 'identity.kenigevents.ru' in text:
+                  edge_candidates.append(str(path.relative_to(root)))
+
+          disk = os.statvfs(home)
+          free_bytes = disk.f_bavail * disk.f_frsize
+          result = {
+              'schema_version': 1,
+              'status': 'READY',
+              'observed_at': datetime.now(UTC).isoformat(),
+              'release_tag': 'v0.1.0-alpha.3',
+              'release_commit_sha': os.environ['RELEASE_COMMIT_SHA'],
+              'release_id': int(os.environ['RELEASE_ID']),
+              'runner': {
+                  'name_sha256': hashlib.sha256(os.environ.get('RUNNER_NAME', '').encode()).hexdigest(),
+                  'os': os.environ.get('RUNNER_OS'),
+                  'arch': os.environ.get('RUNNER_ARCH'),
+                  'uid': os.getuid(),
+                  'home': str(home),
+              },
+              'commands': commands,
+              'passwordless_sudo': sudo_rc == 0,
+              'user_systemd_available': systemd_rc in {0, 1},
+              'selected_free_loopback_port': port,
+              'disk_free_bytes': free_bytes,
+              'edge_source_candidates': sorted(edge_candidates),
+              'public_delivery_key_valid': True,
+              'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+          }
+          missing = []
+          for name in ('gh', 'git', 'python3', 'systemctl', 'nginx', 'certbot', 'sudo', 'openssl', 'curl', 'tar'):
+              if not commands[name]:
+                  missing.append(f'command:{name}')
+          if sudo_rc != 0:
+              missing.append('passwordless_sudo')
+          if systemd_rc not in {0, 1}:
+              missing.append('user_systemd')
+          if port is None:
+              missing.append('loopback_port')
+          if free_bytes < 1_000_000_000:
+              missing.append('disk_space')
+          if not edge_candidates:
+              missing.append('edge_source')
+          result['missing'] = missing
+          if missing:
+              result['status'] = 'BLOCKED'
+          path = pathlib.Path('ops/dataset-loop-mcp/evidence/runner-probe.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+          pathlib.Path('ops/dataset-loop-mcp/runner-probe.completed.json').write_text(
+              json.dumps(
+                  {
+                      'schema_version': 1,
+                      'status': result['status'],
+                      'missing': missing,
+                      'selected_free_loopback_port': port,
+                      'evidence': str(path),
+                      'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + '\n'
+          )
+          if missing:
+              raise SystemExit(f'DevCoveer preflight blocked: {missing!r}')
+          PY
+
+      - name: Deploy immutable alpha.3 and complete real Kaggle/public acceptance
+        id: deployment
+        run: python3 ops/dataset-loop-mcp/deploy_entry_v2.py
+
+      - name: Persist an identified terminal marker and remote readback
+        if: always()
+        run: |
+          set -euo pipefail
+          success=false
+          if [ "${{ steps.deployment.outcome }}" = success ]; then success=true; fi
+          mkdir -p "$RUNNER_TEMP/dataset-loop-terminal"
+          for path in \
+            ops/dataset-loop-mcp/deployment.completed.json \
+            ops/dataset-loop-mcp/evidence/deployment-result.json \
+            ops/dataset-loop-mcp/evidence/deployment-failure.json \
+            ops/dataset-loop-mcp/runtime/owner-connection.envelope.json \
+            ops/dataset-loop-mcp/evidence/runner-probe.json \
+            ops/dataset-loop-mcp/runner-probe.completed.json; do
+            if [ -s "$path" ]; then cp --parents "$path" "$RUNNER_TEMP/dataset-loop-terminal"; fi
+          done
+          if [ -s "$RUNNER_TEMP/dataset-loop-deployment-failure.json" ]; then
+            mkdir -p "$RUNNER_TEMP/dataset-loop-terminal/ops/dataset-loop-mcp/evidence"
+            cp "$RUNNER_TEMP/dataset-loop-deployment-failure.json" \
+              "$RUNNER_TEMP/dataset-loop-terminal/ops/dataset-loop-mcp/evidence/deployment-failure.json"
+          fi
+          git fetch origin main
+          git reset --hard origin/main
+          cp -a "$RUNNER_TEMP/dataset-loop-terminal/." .
+          mkdir -p ops/dataset-loop-mcp/evidence
+          if [ "$success" = true ]; then
+            test -s ops/dataset-loop-mcp/evidence/deployment-result.json
+            test -s ops/dataset-loop-mcp/deployment.completed.json
+            python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          path = pathlib.Path('ops/dataset-loop-mcp/deployment.completed.json')
+          value = json.loads(path.read_text())
+          if value.get('status') != 'PUBLIC_INFRASTRUCTURE_READY':
+              raise SystemExit(f'deployment completion is not ready: {value!r}')
+          value['workflow_run_id'] = int(os.environ['GITHUB_RUN_ID'])
+          value['workflow_run_attempt'] = int(os.environ['GITHUB_RUN_ATTEMPT'])
+          path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+          PY
+          else
+            if [ ! -s ops/dataset-loop-mcp/evidence/deployment-failure.json ]; then
+              cat > ops/dataset-loop-mcp/evidence/deployment-failure.json <<EOF
+          {
+            "schema_version": 1,
+            "status": "FAILED_BEFORE_CONTROLLER_EVIDENCE",
+            "workflow_run_id": ${GITHUB_RUN_ID},
+            "public_mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+            "native_dataset_loop_enabled": false
+          }
+          EOF
+            fi
+            python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          failure = json.loads(pathlib.Path('ops/dataset-loop-mcp/evidence/deployment-failure.json').read_text())
+          pathlib.Path('ops/dataset-loop-mcp/deployment.completed.json').write_text(
+              json.dumps(
+                  {
+                      'schema_version': 1,
+                      'status': failure.get('status', 'FAILED'),
+                      'error': failure.get('error'),
+                      'evidence': 'ops/dataset-loop-mcp/evidence/deployment-failure.json',
+                      'workflow_run_id': int(os.environ['GITHUB_RUN_ID']),
+                      'workflow_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                      'mcp_url': 'https://mcp-dataset-loop.kenigevents.ru/mcp',
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + '\n'
+          )
+          PY
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A ops/dataset-loop-mcp deploy/local-edge scripts
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence: record one-shot Dataset Loop deployment"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+          expected=$(git rev-parse HEAD)
+          actual=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$actual" = "$expected"
+          if [ "$success" != true ]; then exit 1; fi
