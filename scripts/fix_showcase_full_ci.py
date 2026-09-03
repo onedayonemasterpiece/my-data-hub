@@ -152,6 +152,20 @@ def patch_showcase_contract_test() -> None:
     write(path, source)
 
 
+def patch_unified_bootstrap_test() -> None:
+    path = "tests/mcp/test_remote_runtime.py"
+    source = read(path)
+    source = replace_once(
+        source,
+        "    assert catalog == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()\n",
+        "    # This direct fixture intentionally injects no Showcase backend; profile\n"
+        "    # allowlists never make unavailable tools discoverable.\n"
+        '    assert catalog == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}\n',
+        "unified bootstrap optional Showcase expectation",
+    )
+    write(path, source)
+
+
 def patch_runbook() -> None:
     path = "docs/operations/ideahub-showcase-runtime.md"
     source = read(path)
@@ -176,6 +190,7 @@ def main() -> None:
     patch_architecture_test()
     patch_remote_verifier_test()
     patch_showcase_contract_test()
+    patch_unified_bootstrap_test()
     patch_runbook()
     print("showcase full-CI compatibility patch applied")
 
