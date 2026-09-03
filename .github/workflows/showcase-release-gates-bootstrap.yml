@@ -23,10 +23,10 @@ jobs:
           cache: pip
       - name: Apply deterministic Showcase integration repair
         run: python scripts/fix_showcase_full_ci.py
-      - name: Remove one-shot bootstrap files before validation
+      - name: Stage one-shot bootstrap removal before validation
         run: |
-          rm -f scripts/fix_showcase_full_ci.py
-          rm -f .github/workflows/showcase-release-gates-bootstrap.yml
+          git rm -f scripts/fix_showcase_full_ci.py
+          git rm -f .github/workflows/showcase-release-gates-bootstrap.yml
       - name: Verify diff is limited to the intended Showcase integration files
         run: |
           set -euo pipefail
