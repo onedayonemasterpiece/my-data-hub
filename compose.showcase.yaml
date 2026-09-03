@@ -44,6 +44,7 @@ services:
       MY_DATA_HUB_SHOWCASE_SITE_ROOT: /work/showcase-site
       MY_DATA_HUB_ARTIFACT_ROOT: /var/lib/my-data-hub-showcase
       ASTRO_TELEMETRY_DISABLED: "1"
+      TMPDIR: /work
     volumes:
       - "${MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE:?set an absolute 0600 runtime-token path}:/run/secrets/showcase-gateway.key:ro"
       - "${MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE:?set an absolute 0600 read-only deploy-key path}:/run/secrets/idea-hub-deploy-key:ro"

@@ -31,6 +31,7 @@ def test_remote_mcp_receives_only_showcase_gateway_configuration() -> None:
     assert "MY_DATA_HUB_SHOWCASE_SITE_ROOT" in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_SITE_DIR" not in runtime_section
     assert 'ASTRO_TELEMETRY_DISABLED: "1"' in runtime_section
+    assert "TMPDIR: /work" in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_STATE_DIR" in runtime_section
     assert "showcase-static" in runtime_section
 

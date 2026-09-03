@@ -12,6 +12,8 @@ Astro telemetry is disabled in the non-login runtime account so builds never
 attempt to persist user configuration outside the private tmpfs.
 Astro and Vite caches live under the writable runtime copy's `.cache` directory,
 never under the immutable `node_modules` symlink.
+`TMPDIR=/work` keeps the transient Git checkout, renderer cache, and Astro output
+on the same private filesystem, preserving Astro's atomic asset renames.
 
 ## Ownership boundary
 
