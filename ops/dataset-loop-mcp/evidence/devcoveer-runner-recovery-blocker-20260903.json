@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "status": "BLOCKED_AT_DEVCOVEER_EXECUTION_BOUNDARY",
+  "recorded_date": "2026-09-03",
+  "source_action": {
+    "repository": "onedayonemasterpiece/idea-hub",
+    "ref": "main",
+    "path": "continuations/dataset-loop-mcp/devcoveer-runner-recovery-action-20260903.md"
+  },
+  "immutable_runner_recovery": {
+    "repository": "onedayonemasterpiece/my-data-hub",
+    "commit": "66b2b820d0bc7e5e85dec5bd496494426fdec2a3",
+    "path": "scripts/recover_devstand_github_runner.sh",
+    "command_attempted": true,
+    "result": "BLOCKED",
+    "error_class": "SUDO_NO_NEW_PRIVILEGES",
+    "sanitized_error": "sudo: The no new privileges flag is set, which prevents sudo from running as root."
+  },
+  "non_root_repository_runner_fallback": {
+    "attempted": true,
+    "result": "BLOCKED_BEFORE_REGISTRATION",
+    "required_operation": "obtain a repository runner registration token and download the official GitHub Actions runner",
+    "blocker": "The DevCoveer executor could not resolve or establish outbound TCP/443 connections to github.com or api.github.com.",
+    "runner_install_directory_created": false,
+    "runner_process_observed": false
+  },
+  "github_observation": {
+    "my_data_hub_main": "66b2b820d0bc7e5e85dec5bd496494426fdec2a3",
+    "actual_probe_run_id": 33720063571,
+    "actual_probe_job_id": 100537192917,
+    "probe_job_status": "queued",
+    "probe_job_runner_id": 0,
+    "probe_job_runner_name": "",
+    "deployment_run_id": 33704359614,
+    "deployment_run_status": "pending",
+    "deployment_jobs_count": 0,
+    "stale_or_incorrect_probe_reference": 33837954143,
+    "stale_or_incorrect_probe_reference_result": "GitHub API 404"
+  },
+  "devcoveer_network_observation": {
+    "observed_at": "2026-09-03T06:29:12Z",
+    "dns": {
+      "api.github.com": "UNRESOLVED",
+      "github.com": "UNRESOLVED"
+    },
+    "https_by_hostname": {
+      "api.github.com": "curl error 6: Could not resolve host",
+      "github.com": "git/curl: Could not resolve host"
+    },
+    "direct_sni_tls_probe": {
+      "result": "ALL_TESTED_DESTINATIONS_FAILED",
+      "api_github_com_tested_ips": [
+        "140.82.121.5",
+        "140.82.121.6",
+        "140.82.114.6",
+        "20.201.28.148",
+        "140.82.112.5",
+        "20.205.243.168"
+      ],
+      "github_com_tested_ips": [
+        "140.82.121.3",
+        "140.82.121.4",
+        "140.82.112.4"
+      ],
+      "sanitized_result": "Every curl --resolve probe failed immediately to connect to TCP/443, so this was not only a DNS failure."
+    }
+  },
+  "verified_release_authority": {
+    "tag": "v0.1.0-alpha.3",
+    "commit": "7a5b5ebbbd619a980cbf8e48ecbbe2f0fdf2cdfc",
+    "release_id": 381628831,
+    "deployment_started": false
+  },
+  "acceptance": {
+    "online_runner_and_job_assignment": "BLOCKED",
+    "dns_tls_and_exact_sni_ingress": "NOT_REACHED",
+    "loopback_service_and_migration": "NOT_REACHED",
+    "public_health_and_authenticated_mcp": "NOT_REACHED",
+    "owner_pct_bootstrap_and_envelope": "NOT_REACHED",
+    "real_kaggle_smoke": "NOT_REACHED",
+    "concurrent_slots_s01_s02": "NOT_REACHED",
+    "callback_poll_restart_cancel_artifact_fence_cleanup": "NOT_REACHED",
+    "native_dataset_loop_canary": "NOT_REACHED"
+  },
+  "public_endpoint": {
+    "hostname": "mcp-dataset-loop.kenigevents.ru",
+    "status": "UNRESOLVED_AND_UNDEPLOYED"
+  },
+  "safety": {
+    "product_source_modified": false,
+    "existing_authorities_modified": false,
+    "pct_created": false,
+    "plaintext_owner_connection_file_created": false,
+    "secrets_written_to_git": false,
+    "secrets_disclosed": false,
+    "fake_success_recorded": false
+  },
+  "codex_execution": {
+    "initial_thread": "01a065de-4616-7803-b615-bc1e3268b228",
+    "continuation_thread": "01a065e9-b4e2-7f73-a04e-91c08cc69a24",
+    "bounded_runner_thread": "01a065f0-e1ad-7b92-8961-90ba0e4956d0",
+    "network_probe_thread": "01a065f4-db4c-7fe3-88c5-a96c939f71fd",
+    "direct_ip_probe_thread": "01a065f6-1adb-71e2-bfee-5bb24be45adf"
+  },
+  "exact_blocker": "The available Codex DevCoveer execution boundary simultaneously denies root/systemd recovery through no_new_privs and denies the GitHub egress required to register a non-root repository runner. Therefore no Actions runner can accept the queued job and the one-shot deployment cannot begin from this execution boundary.",
+  "next_execution_authority": "DevCoveer platform control must restore either host-level execution of the immutable recovery script or outbound GitHub connectivity for a user-owned repository runner. After that, the same immutable recovery action can resume without any product redesign or owner shell operation."
+}
