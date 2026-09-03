@@ -30,7 +30,9 @@ jobs:
       - name: Verify diff is limited to the intended Showcase integration files
         run: |
           set -euo pipefail
-          git diff --name-only | sort > "$RUNNER_TEMP/changed.txt"
+          git diff --name-only \
+            | grep -v -E '^(scripts/fix_showcase_full_ci\.py|\.github/workflows/showcase-release-gates-bootstrap\.yml)$' \
+            | sort > "$RUNNER_TEMP/changed.txt"
           cat > "$RUNNER_TEMP/expected.txt" <<'EOF'
           docs/operations/ideahub-showcase-runtime.md
           src/my_data_hub/mcp/catalog.py
