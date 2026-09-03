@@ -1,6 +1,7 @@
 # 2026-09-03 Voice Intake v2 wall-clock overlap
 
-Status: mitigated; permanent Android rollout pending
+Status: recovered; server correction deployed and Android 1.1.0-rc3 published;
+device installation pending
 
 ## Impact
 
@@ -36,5 +37,32 @@ spool and on the phone.
 
 ## Release evidence
 
-To be filled with the server commit/image, Android commit/artifact, affected
-session GitHub commit/url, terminal status, and purge readback.
+- Server commit, immutable release and control-plane image:
+  `4265967302c696174454df845c6224d7555b6faf`; it is reachable from
+  `origin/main`. After deployment all five compose services reported healthy
+  and the authenticated runtime exported the 50 ms boundary.
+- Recovery completion returned HTTP 202 and `queued`. The worker then advanced
+  through `summarizing`, `publishing`, and `published_verified` without a
+  retryable or reconciliation error.
+- Final accounting: 3/3 chunks, 1,866,404 bytes, 458,310 ms recorded audio,
+  two completed Gemini requests with distinct durable request UIDs,
+  transcription complete, and summary complete.
+- IdeaHub packet:
+  <https://github.com/onedayonemasterpiece/idea-hub/blob/main/inbox/voice/2026/09/voice-20260903-204457-368264f8.md>
+  at commit `7c811c04e12068f42ce4d87588ece00b66da84be`. Authenticated GitHub Contents
+  readback succeeded both at that commit and at `main`; the publication commit
+  was exactly the current `idea-hub/main` head at verification time.
+- Ledger and filesystem readback: `github_verified=1`,
+  `server_audio_purged=1`, `retryable=0`, no error or reconciliation flag, and
+  neither the chunk nor normalized-audio directory remained.
+- Android correction merged to `record-idea-hub/main` as
+  `35fb24ee20ef2845824032793dedb60aee7ea6fa`. Main CI run
+  <https://github.com/onedayonemasterpiece/record-idea-hub/actions/runs/33797105016>
+  passed lint, unit tests, and APK assembly. Artifact
+  `record-idea-hub-1.1-rc3-apk` (ID `9909691659`) contains
+  `record-idea-hub-1.1.0-rc3-debug.apk`, SHA-256
+  `051aa06be3140f3f7efcd4a877f4f81d7170cdfaff9674b9fceb8dd4d042e6fa`.
+
+The affected session is fully recovered. Closure of the client-prevention
+rollout still requires installing RC3 on the approved Android device; the host
+had no connected ADB device during recovery, so no installation claim is made.
