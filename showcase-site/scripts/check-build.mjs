@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
 const outDir = resolve(process.env.SHOWCASE_OUT_DIR || './dist');
@@ -34,6 +34,33 @@ for (const file of htmlFiles) {
   }
 }
 
+const indexPath = join(outDir, 'index.html');
+const indexHtml = readFileSync(indexPath, 'utf8');
+const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/giu)];
+for (const [, attributes, body] of scripts) {
+  if (!/\bsrc=(?:"[^"]+"|'[^']+')/iu.test(attributes) && body.trim()) {
+    throw new Error('Executable inline script is forbidden in index.html');
+  }
+}
+const externalScripts = scripts.flatMap(([, attributes]) => {
+  const match = attributes.match(/\bsrc=(?:"([^"]+)"|'([^']+)')/iu);
+  return match ? [match[1] || match[2]] : [];
+});
+const base = `/v/${slug}/`;
+const showcaseScript = externalScripts.find((source) => source.startsWith(base));
+if (!showcaseScript) throw new Error(`Missing same-origin Showcase script under ${base}`);
+const relativeScript = showcaseScript.slice(base.length);
+if (!relativeScript.endsWith('.js') || relativeScript.includes('?') || relativeScript.includes('#')) {
+  throw new Error(`Invalid Showcase script asset path: ${showcaseScript}`);
+}
+const scriptPath = join(outDir, relativeScript);
+if (!existsSync(scriptPath) || !statSync(scriptPath).isFile()) {
+  throw new Error(`Referenced Showcase script asset is missing: ${relativeScript}`);
+}
+const scriptSource = readFileSync(scriptPath, 'utf8');
+for (const marker of ['data-showcase-filter', 'showcase-result-count', 'addEventListener']) {
+  if (!scriptSource.includes(marker)) throw new Error(`Showcase script is missing marker: ${marker}`);
+}
 const inventory = files.map((file) => {
   const bytes = readFileSync(file);
   return {
