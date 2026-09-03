@@ -9,11 +9,10 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,7 +41,13 @@ def safe(value: str, limit: int = 8000) -> str:
     return value[-limit:]
 
 
-def run(argv: list[str], *, check: bool = True, timeout: int = 120, host_gh: bool = False) -> subprocess.CompletedProcess[str]:
+def run(
+    argv: list[str],
+    *,
+    check: bool = True,
+    timeout: int = 120,
+    host_gh: bool = False,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     if host_gh:
         env.pop("GH_TOKEN", None)
@@ -81,7 +86,11 @@ def connection() -> dict[str, Any]:
 
 def api(conn: dict[str, Any], method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
     body = None if payload is None else json.dumps(payload).encode()
-    headers = {"Accept": "application/json", "Content-Type": "application/json", "Authorization": str(conn["authorization"])}
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": str(conn["authorization"]),
+    }
     request = urllib.request.Request(PUBLIC_BASE_URL + path, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
@@ -121,9 +130,20 @@ def candidate_private_files() -> tuple[list[pathlib.Path], list[pathlib.Path]]:
             except OSError:
                 continue
             lower = path.name.casefold()
-            if (path.suffix.casefold() == ".pem" or ("github" in lower and ("app" in lower or "key" in lower))) and not mode & 0o077:
+            private_github_key = path.suffix.casefold() == ".pem" or (
+                "github" in lower and ("app" in lower or "key" in lower)
+            )
+            if private_github_key and not mode & 0o077:
                 pems.append(path.resolve())
-            if path.suffix.casefold() in {".env", ".conf", ".ini", ".toml", ".yaml", ".yml"} and not mode & 0o004:
+            private_config = path.suffix.casefold() in {
+                ".env",
+                ".conf",
+                ".ini",
+                ".toml",
+                ".yaml",
+                ".yml",
+            }
+            if private_config and not mode & 0o004:
                 envs.append(path.resolve())
     return sorted(set(pems)), sorted(set(envs))
 
@@ -140,10 +160,8 @@ def discover_github_app() -> dict[str, Any]:
     }
     lines = [f"{key}={value}" for key, value in os.environ.items()]
     for path in envs:
-        try:
+        with suppress(OSError):
             lines.extend(path.read_text(errors="ignore").splitlines())
-        except OSError:
-            pass
     for raw in lines:
         line = raw.strip()
         if match := patterns["app"].match(line):
@@ -161,7 +179,11 @@ def discover_github_app() -> dict[str, Any]:
         if "PRIVATE KEY" not in private_key:
             continue
         for app_id in sorted(app_ids):
-            app_jwt = jwt.encode({"iat": now - 60, "exp": now + 480, "iss": str(app_id)}, private_key, algorithm="RS256")
+            app_jwt = jwt.encode(
+                {"iat": now - 60, "exp": now + 480, "iss": str(app_id)},
+                private_key,
+                algorithm="RS256",
+            )
             headers = {
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {app_jwt}",
@@ -191,7 +213,9 @@ def discover_github_app() -> dict[str, Any]:
                 except Exception:
                     continue
                 token = str(minted.get("token") or "")
-                repositories = {str(value.get("name")) for value in minted.get("repositories") or [] if isinstance(value, dict)}
+                repositories = {
+                    str(value.get("name")) for value in minted.get("repositories") or [] if isinstance(value, dict)
+                }
                 if token and (not repositories or "idea-hub" in repositories):
                     token = ""
                     return {
@@ -213,10 +237,16 @@ def acquire_pack_and_opencode() -> dict[str, Any]:
     if not pack.is_file():
         run(
             [
-                "gh", "release", "download", "dataset-loop-pack-v0.1.0-alpha.2",
-                "--repo", "onedayonemasterpiece/dataset-loop-mcp",
-                "--pattern", pack.name,
-                "--dir", str(cache),
+                "gh",
+                "release",
+                "download",
+                "dataset-loop-pack-v0.1.0-alpha.2",
+                "--repo",
+                "onedayonemasterpiece/dataset-loop-mcp",
+                "--pattern",
+                pack.name,
+                "--dir",
+                str(cache),
             ],
             host_gh=True,
             timeout=300,
@@ -336,20 +366,44 @@ def wait_run(conn: dict[str, Any], run_id: str, timeout: int = 3600) -> dict[str
 
 
 def safe_run(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: value.get(key) for key in ("id", "workload_type", "duration_minutes", "state", "provider_session_id", "slot_id", "kernel_id", "notebook_revision", "manifest_sha256", "lease_generation", "branch", "git_head", "checkpoint", "created_at", "updated_at")}
+    keys = (
+        "id",
+        "workload_type",
+        "duration_minutes",
+        "state",
+        "provider_session_id",
+        "slot_id",
+        "kernel_id",
+        "notebook_revision",
+        "manifest_sha256",
+        "lease_generation",
+        "branch",
+        "git_head",
+        "checkpoint",
+        "created_at",
+        "updated_at",
+    )
+    return {key: value.get(key) for key in keys}
 
 
 def write_result(value: dict[str, Any]) -> None:
     EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
     EVIDENCE.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
-    MARKER.write_text(json.dumps({
-        "schema_version": 1,
-        "status": value["status"],
-        "native_dataset_loop_enabled": value.get("native_dataset_loop_enabled", False),
-        "public_mcp_url": PUBLIC_MCP_URL,
-        "evidence": str(EVIDENCE),
-        "workflow_run_id": int(os.environ.get("GITHUB_RUN_ID", "0")),
-    }, indent=2, sort_keys=True) + "\n")
+    MARKER.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": value["status"],
+                "native_dataset_loop_enabled": value.get("native_dataset_loop_enabled", False),
+                "public_mcp_url": PUBLIC_MCP_URL,
+                "evidence": str(EVIDENCE),
+                "workflow_run_id": int(os.environ.get("GITHUB_RUN_ID", "0")),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 
 def main() -> int:
@@ -362,7 +416,10 @@ def main() -> int:
         fields = settings_fields()
         app = discover_github_app()
         native = acquire_pack_and_opencode()
-        base_sha = run(["gh", "api", f"repos/{TARGET_REPOSITORY}/branches/main", "--jq", ".commit.sha"], host_gh=True).stdout.strip()
+        base_sha = run(
+            ["gh", "api", f"repos/{TARGET_REPOSITORY}/branches/main", "--jq", ".commit.sha"],
+            host_gh=True,
+        ).stdout.strip()
         if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
             raise NativeError("idea-hub exact base SHA is unavailable")
         configured = update_env(fields, app, native, False)
@@ -378,11 +435,19 @@ def main() -> int:
         git_head = str(terminal.get("git_head") or "")
         if not branch.startswith("dataset-loop/run/") or not re.fullmatch(r"[0-9a-f]{40}", git_head):
             raise NativeError("native canary has no exact run branch/head")
-        remote = run(["gh", "api", f"repos/{TARGET_REPOSITORY}/git/ref/heads/{branch}", "--jq", ".object.sha"], host_gh=True).stdout.strip()
+        remote = run(
+            ["gh", "api", f"repos/{TARGET_REPOSITORY}/git/ref/heads/{branch}", "--jq", ".object.sha"],
+            host_gh=True,
+        ).stdout.strip()
         if remote != git_head:
             raise NativeError("native run branch remote readback differs from run head")
         artifacts = api(conn, "GET", f"/v1/runs/{terminal['id']}/artifacts")
-        if not isinstance(artifacts, list) or not artifacts or any(not item.get("verified_readback") for item in artifacts):
+        artifacts_invalid = (
+            not isinstance(artifacts, list)
+            or not artifacts
+            or any(not item.get("verified_readback") for item in artifacts)
+        )
+        if artifacts_invalid:
             raise NativeError("native artifacts are absent or lack verified readback")
         names = {str(item.get("name") or "").casefold() for item in artifacts}
         if not any("session" in name and "bundle" in name for name in names):
@@ -417,7 +482,11 @@ def main() -> int:
         if backup.is_file():
             shutil.copy2(backup, env_path)
         elif env_path.is_file():
-            text = re.sub(r"(?m)^DATASET_LOOP_NATIVE_DATASET_LOOP_ENABLED=.*$", "DATASET_LOOP_NATIVE_DATASET_LOOP_ENABLED=false", env_path.read_text())
+            text = re.sub(
+                r"(?m)^DATASET_LOOP_NATIVE_DATASET_LOOP_ENABLED=.*$",
+                "DATASET_LOOP_NATIVE_DATASET_LOOP_ENABLED=false",
+                env_path.read_text(),
+            )
             env_path.write_text(text)
         if env_path.is_file():
             env_path.chmod(0o600)
