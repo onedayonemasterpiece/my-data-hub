@@ -4,7 +4,8 @@
 The runtime image installs the HTTP client used by the gateway, and the read-only
 static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
 The immutable renderer template is copied into the runtime's private `/work`
-tmpfs and made owner-writable there before Astro links its dependencies.
+tmpfs and made owner-writable there before Astro links its dependencies. The
+builder consumes that copy through `MY_DATA_HUB_SHOWCASE_SITE_ROOT`.
 
 ## Ownership boundary
 

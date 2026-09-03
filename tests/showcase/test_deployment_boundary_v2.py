@@ -28,6 +28,8 @@ def test_remote_mcp_receives_only_showcase_gateway_configuration() -> None:
     assert "MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE" in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE" in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_SITE_TEMPLATE_DIR" in runtime_section
+    assert "MY_DATA_HUB_SHOWCASE_SITE_ROOT" in runtime_section
+    assert "MY_DATA_HUB_SHOWCASE_SITE_DIR" not in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_STATE_DIR" in runtime_section
     assert "showcase-static" in runtime_section
 
