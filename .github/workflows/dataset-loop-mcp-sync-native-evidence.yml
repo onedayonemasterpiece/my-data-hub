@@ -1,0 +1,58 @@
+name: dataset-loop-mcp-sync-native-evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/native-canary.completed.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dataset-loop-mcp-evidence-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synchronize native canary evidence
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          gh auth status >/dev/null
+          python3 - <<'PY'
+          from __future__ import annotations
+          import base64,json,pathlib,subprocess
+          evidence_path=pathlib.Path('ops/dataset-loop-mcp/evidence/native-canary.json')
+          evidence=json.loads(evidence_path.read_text())
+          content=json.dumps(evidence,indent=2,ensure_ascii=False,sort_keys=True)+'\n'
+          markdown='\n'.join([
+              '# Dataset Loop MCP — native canary result','',
+              f"Status: **{evidence.get('status')}**",'',
+              'Endpoint: `https://mcp-dataset-loop.kenigevents.ru/mcp`.','',
+              f"Native execution enabled: `{evidence.get('native_dataset_loop_enabled',False)}`.",'',
+              (f"Error: `{evidence.get('error')}`" if evidence.get('error') else 'Remote Git and artifact readback passed.'),'',
+              'Canonical host evidence: `onedayonemasterpiece/my-data-hub/ops/dataset-loop-mcp/evidence/native-canary.json`.',''
+          ])
+          def gh(args):
+              result=subprocess.run(['gh',*args],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False)
+              if result.returncode!=0: raise SystemExit(result.stdout[-2000:])
+              return result.stdout
+          def upsert(repo,path,text,message):
+              old=subprocess.run(['gh','api',f'repos/{repo}/contents/{path}?ref=main','--jq','.sha'],text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
+              args=['api','--method','PUT',f'repos/{repo}/contents/{path}','-f',f'message={message}','-f',f'content={base64.b64encode(text.encode()).decode()}','-f','branch=main']
+              if old.returncode==0 and old.stdout.strip(): args += ['-f',f'sha={old.stdout.strip()}']
+              return json.loads(gh(args))['commit']['sha']
+          paths=[
+              ('onedayonemasterpiece/idea-hub','continuations/dataset-loop-mcp/devcoveer-native-canary-result-20260903.md',markdown,'record: Dataset Loop MCP native canary result'),
+              ('onedayonemasterpiece/idea-hub','continuations/dataset-loop-mcp/devcoveer-native-canary-evidence-20260903.json',content,'record: Dataset Loop MCP native canary evidence'),
+              ('onedayonemasterpiece/dataset-loop-mcp','evidence/deployment/devcoveer-native-canary.json',content,'evidence: record DevCoveer native canary'),
+          ]
+          for repo,path,text,message in paths:
+              upsert(repo,path,text,message)
+              gh(['api',f'repos/{repo}/contents/{path}?ref=main'])
+          PY
