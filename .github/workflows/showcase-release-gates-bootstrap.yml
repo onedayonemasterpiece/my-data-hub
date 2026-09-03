@@ -1,5 +1,6 @@
 name: showcase-release-gates-bootstrap
 
+# One-shot GitHub-hosted verification; the successful commit removes this workflow.
 on:
   push:
     branches:
