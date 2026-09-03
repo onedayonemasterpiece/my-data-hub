@@ -232,7 +232,19 @@ class GitSshShowcaseSource:
                 cwd=checkout,
                 env=env,
             )
-            self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout, env=env)
+            # The private repository can contain large unrelated visual assets.
+            # Keep the bounded runtime tmpfs focused on the Showcase subtree and
+            # fetch other blobs lazily rather than checking out the whole tree.
+            self._run(
+                ["git", "sparse-checkout", "set", "--no-cone", f"/{self.root}/"],
+                cwd=checkout,
+                env=env,
+            )
+            self._run(
+                ["git", "fetch", "--quiet", "--filter=blob:none", "--depth=1", "origin", self.ref],
+                cwd=checkout,
+                env=env,
+            )
             revision = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout, env=env)
             if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
                 raise ShowcaseSourceError("Git SSH source did not resolve an exact commit SHA")

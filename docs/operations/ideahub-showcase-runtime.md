@@ -6,6 +6,8 @@ static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
 The immutable renderer template is copied into the runtime's private `/work`
 tmpfs and made owner-writable there before Astro links its dependencies. The
 builder consumes that copy through `MY_DATA_HUB_SHOWCASE_SITE_ROOT`.
+The read-only Git source uses a blobless sparse checkout of the configured
+Showcase subtree so unrelated repository assets cannot exhaust the runtime tmpfs.
 
 ## Ownership boundary
 

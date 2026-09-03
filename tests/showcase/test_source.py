@@ -33,3 +33,11 @@ def test_git_ssh_source_rejects_non_private_key_permissions(tmp_path: Path) -> N
     known_hosts.write_text("github.com ssh-ed25519 placeholder\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mode 0600"):
         GitSshShowcaseSource(key_file=key, known_hosts_file=known_hosts)
+
+
+def test_git_ssh_source_uses_sparse_blobless_checkout() -> None:
+    source = (Path(__file__).resolve().parents[2] / "src/my_data_hub/showcase/source.py").read_text(
+        encoding="utf-8"
+    )
+    assert '["git", "sparse-checkout", "set", "--no-cone", f"/{self.root}/"]' in source
+    assert '"--filter=blob:none"' in source
