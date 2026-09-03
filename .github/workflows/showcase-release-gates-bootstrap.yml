@@ -22,13 +22,28 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Normalize pre-existing Dataset Loop ops lint only
+        run: |
+          set -euo pipefail
+          ruff check ops/dataset-loop-mcp/deploy.py ops/dataset-loop-mcp/native_canary.py --fix
+          ruff format ops/dataset-loop-mcp/deploy.py ops/dataset-loop-mcp/native_canary.py
+          changed="$(git diff --name-only | sort)"
+          expected=$'ops/dataset-loop-mcp/deploy.py\nops/dataset-loop-mcp/native_canary.py'
+          test "$changed" = "$expected"
+          ruff check ops/dataset-loop-mcp/deploy.py ops/dataset-loop-mcp/native_canary.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ops/dataset-loop-mcp/deploy.py ops/dataset-loop-mcp/native_canary.py
+          git commit -m 'chore(dataset-loop): satisfy repository lint'
       - name: Apply deterministic Showcase integration repair
         run: python scripts/fix_showcase_full_ci.py
       - name: Stage one-shot bootstrap removal before validation
         run: |
           git rm -f scripts/fix_showcase_full_ci.py
           git rm -f .github/workflows/showcase-release-gates-bootstrap.yml
-      - name: Verify diff is limited to the intended Showcase integration files
+      - name: Verify remaining diff is limited to Showcase integration files
         run: |
           set -euo pipefail
           git diff --name-only \
@@ -45,8 +60,6 @@ jobs:
           EOF
           sort -o "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/expected.txt"
           diff -u "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/changed.txt"
-      - name: Install development dependencies
-        run: python -m pip install -e '.[dev]'
       - name: Repository validation
         run: python scripts/validate_repository.py
       - name: Secret scan
@@ -57,7 +70,7 @@ jobs:
         run: pytest
       - name: Ruff
         run: ruff check .
-      - name: Commit verified repair
+      - name: Commit verified Showcase repair
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
