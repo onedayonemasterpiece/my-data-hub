@@ -46,6 +46,13 @@ def test_showcase_runtime_image_contains_renderer_but_mcp_image_stays_unchanged(
     assert "node_modules" not in mcp
 
 
+def test_renderer_caches_stay_outside_immutable_node_modules() -> None:
+    config = (ROOT / "showcase-site/astro.config.mjs").read_text(encoding="utf-8")
+    assert "SHOWCASE_CACHE_DIR" in config
+    assert "cacheDir: resolve(cacheRoot, 'astro')" in config
+    assert "cacheDir: resolve(cacheRoot, 'vite')" in config
+
+
 def test_standard_remote_mcp_selects_private_gateway() -> None:
     source = (ROOT / "src/my_data_hub/mcp/server.py").read_text(encoding="utf-8")
     assert "ShowcaseGatewayClient" in source

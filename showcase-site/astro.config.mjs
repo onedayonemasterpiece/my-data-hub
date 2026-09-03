@@ -9,6 +9,7 @@ if (!/^[A-Za-z0-9_-]{20,80}$/u.test(slug)) {
 
 const origin = String(process.env.SHOWCASE_ORIGIN || 'https://ideas.kenigevents.ru').replace(/\/+$/u, '');
 const outDir = resolve(process.env.SHOWCASE_OUT_DIR || './dist');
+const cacheRoot = resolve(process.env.SHOWCASE_CACHE_DIR || './.cache');
 
 export default defineConfig({
   site: origin,
@@ -16,10 +17,12 @@ export default defineConfig({
   output: 'static',
   trailingSlash: 'always',
   outDir,
+  cacheDir: resolve(cacheRoot, 'astro'),
   build: {
     assets: '_assets',
   },
   vite: {
+    cacheDir: resolve(cacheRoot, 'vite'),
     server: {
       allowedHosts: true,
     },

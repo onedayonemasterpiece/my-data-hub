@@ -10,6 +10,8 @@ The read-only Git source uses a blobless sparse checkout of the configured
 Showcase subtree so unrelated repository assets cannot exhaust the runtime tmpfs.
 Astro telemetry is disabled in the non-login runtime account so builds never
 attempt to persist user configuration outside the private tmpfs.
+Astro and Vite caches live under the writable runtime copy's `.cache` directory,
+never under the immutable `node_modules` symlink.
 
 ## Ownership boundary
 
