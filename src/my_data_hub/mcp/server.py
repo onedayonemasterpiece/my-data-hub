@@ -930,7 +930,11 @@ def create_streamable_http_app(
 
     from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
 
-    dependencies = _with_showcase_manager(dependencies)
+    dependencies = _with_showcase_manager(
+        dependencies,
+        settings=settings,
+        fallback=None,
+    )
     server = create_server(settings, dependencies=dependencies)
     mcp_app = server.streamable_http_app(
         host=settings.mcp_host,
