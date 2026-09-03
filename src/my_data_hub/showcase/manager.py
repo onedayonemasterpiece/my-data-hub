@@ -11,7 +11,7 @@ from typing import Any
 from .builder import AstroShowcaseBuilder
 from .models import RegistryState, SurfaceState
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
-from .source import FilesystemShowcaseSource, GitHubShowcaseSource, ShowcaseSource
+from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitSshShowcaseSource, ShowcaseSource
 from .state import ShowcaseStateStore
 
 
@@ -44,16 +44,32 @@ class ShowcaseManager:
         if source_root:
             source: ShowcaseSource = FilesystemShowcaseSource(Path(source_root))
         else:
-            token = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN", "").strip()
-            source = GitHubShowcaseSource(
-                token=token,
-                repository=os.getenv(
-                    "MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY",
-                    "onedayonemasterpiece/idea-hub",
-                ),
-                ref=os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_REF", "main"),
-                root=os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_ROOT", "showcase"),
+            repository = os.getenv(
+                "MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY",
+                "onedayonemasterpiece/idea-hub",
             )
+            ref = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_REF", "main")
+            root = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_ROOT", "showcase")
+            ssh_key_file = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE", "").strip()
+            if ssh_key_file:
+                known_hosts_file = os.getenv(
+                    "MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE",
+                    "/etc/ssh/ssh_known_hosts",
+                ).strip()
+                source = GitSshShowcaseSource(
+                    key_file=Path(ssh_key_file),
+                    known_hosts_file=Path(known_hosts_file),
+                    repository=repository,
+                    ref=ref,
+                    root=root,
+                )
+            else:
+                source = GitHubShowcaseSource(
+                    token=os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN", "").strip(),
+                    repository=repository,
+                    ref=ref,
+                    root=root,
+                )
         repository_root = Path(__file__).resolve().parents[3]
         source_site_root = repository_root / "showcase-site"
         packaged_site_root = Path(__file__).resolve().parents[1] / "showcase_site"

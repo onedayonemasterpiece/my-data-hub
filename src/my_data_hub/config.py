@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -46,7 +47,8 @@ def _secret_map(name: str) -> tuple[tuple[str, str], ...]:
     except json.JSONDecodeError as exc:
         raise ConfigurationError(f"{name} must be a JSON object") from exc
     if not isinstance(value, dict) or not all(
-        isinstance(key, str) and key and isinstance(secret, str) and secret for key, secret in value.items()
+        isinstance(key, str) and key and isinstance(secret, str) and secret
+        for key, secret in value.items()
     ):
         raise ConfigurationError(f"{name} must map connector IDs to non-empty secrets")
     secrets = tuple(value.values())
@@ -99,6 +101,25 @@ class Settings:
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
     canonical_committer_database_url: str = ""
+    google_youtube_enabled: bool = False
+    google_youtube_model: str = "gemini-3.6-flash"
+    google_youtube_allowed_models: tuple[str, ...] = (
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+    )
+    google_youtube_connect_timeout_seconds: int = 30
+    google_youtube_first_event_timeout_seconds: int = 120
+    google_youtube_idle_timeout_seconds: int = 300
+    google_youtube_total_timeout_seconds: int = 1800
+    google_youtube_max_raw_sse_bytes: int = 4_194_304
+    google_youtube_max_model_output_bytes: int = 1_048_576
+    google_youtube_max_result_bytes: int = 2_097_152
+    google_youtube_max_output_tokens: int = 8192
+    google_youtube_default_store: bool = False
+    google_ai_limiter_supabase_url: str = ""
+    google_ai_limiter_supabase_service_key: str = ""
+    google_ai_normal_key_envs: tuple[str, ...] = ()
+    showcase_enabled: bool = False
 
     @classmethod
     def from_env(cls, *, require_database: bool = True) -> Settings:
@@ -110,16 +131,26 @@ class Settings:
             environment=os.getenv("MY_DATA_HUB_ENVIRONMENT", "development").strip().lower(),
             instance_id=os.getenv("MY_DATA_HUB_INSTANCE_ID", "local").strip(),
             log_level=os.getenv("MY_DATA_HUB_LOG_LEVEL", "INFO").strip().upper(),
-            artifact_root=Path(os.getenv("MY_DATA_HUB_ARTIFACT_ROOT", "./artifacts")).expanduser().resolve(),
+            artifact_root=Path(
+                os.getenv("MY_DATA_HUB_ARTIFACT_ROOT", "./artifacts")
+            ).expanduser().resolve(),
             api_host=os.getenv("MY_DATA_HUB_API_HOST", "127.0.0.1").strip(),
             api_port=_int("MY_DATA_HUB_API_PORT", 8080),
             worker_result_token=os.getenv("MY_DATA_HUB_WORKER_RESULT_TOKEN") or None,
-            worker_result_max_bytes=_int("MY_DATA_HUB_WORKER_RESULT_MAX_BYTES", 4 * 1024 * 1024),
+            worker_result_max_bytes=_int(
+                "MY_DATA_HUB_WORKER_RESULT_MAX_BYTES", 4 * 1024 * 1024
+            ),
             scheduler_enabled=_bool("MY_DATA_HUB_SCHEDULER_ENABLED", False),
-            production_publish_enabled=_bool("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED", False),
-            orchestrator_interval_seconds=_int("MY_DATA_HUB_ORCHESTRATOR_INTERVAL_SECONDS", 60),
+            production_publish_enabled=_bool(
+                "MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED", False
+            ),
+            orchestrator_interval_seconds=_int(
+                "MY_DATA_HUB_ORCHESTRATOR_INTERVAL_SECONDS", 60
+            ),
             orchestrator_batch_size=_int("MY_DATA_HUB_ORCHESTRATOR_BATCH_SIZE", 25),
-            orchestrator_lease_seconds=_int("MY_DATA_HUB_ORCHESTRATOR_LEASE_SECONDS", 1800),
+            orchestrator_lease_seconds=_int(
+                "MY_DATA_HUB_ORCHESTRATOR_LEASE_SECONDS", 1800
+            ),
             mcp_remote_enabled=_bool("MY_DATA_HUB_MCP_REMOTE_ENABLED", False),
             mcp_write_enabled=_bool("MY_DATA_HUB_MCP_WRITE_ENABLED", False),
             mcp_host=os.getenv("MY_DATA_HUB_MCP_HOST", "127.0.0.1").strip(),
@@ -130,8 +161,12 @@ class Settings:
                     "http://127.0.0.1,http://localhost",
                 )
             ),
-            mcp_allowed_hosts=_csv(os.getenv("MY_DATA_HUB_MCP_ALLOWED_HOSTS", "127.0.0.1,localhost")),
-            mcp_auth_mode=os.getenv("MY_DATA_HUB_MCP_AUTH_MODE", "stdio-environment").strip(),
+            mcp_allowed_hosts=_csv(
+                os.getenv("MY_DATA_HUB_MCP_ALLOWED_HOSTS", "127.0.0.1,localhost")
+            ),
+            mcp_auth_mode=os.getenv(
+                "MY_DATA_HUB_MCP_AUTH_MODE", "stdio-environment"
+            ).strip(),
             mcp_development_token=os.getenv("MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN") or None,
             mcp_scopes=frozenset(
                 _csv(
@@ -142,29 +177,102 @@ class Settings:
                     )
                 )
             ),
-            connector_credentials=_secret_map("MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON"),
-            connector_intake_max_bytes=_int("MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024),
+            connector_credentials=_secret_map(
+                "MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON"
+            ),
+            connector_intake_max_bytes=_int(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024
+            ),
             mcp_oauth_issuer=os.getenv("MY_DATA_HUB_MCP_OAUTH_ISSUER", "").strip(),
             mcp_oauth_audience=os.getenv("MY_DATA_HUB_MCP_OAUTH_AUDIENCE", "").strip(),
             mcp_oauth_resource=os.getenv("MY_DATA_HUB_MCP_OAUTH_RESOURCE", "").strip(),
             mcp_oauth_jwks_url=os.getenv("MY_DATA_HUB_MCP_OAUTH_JWKS_URL", "").strip(),
-            mcp_oauth_algorithms=_csv(os.getenv("MY_DATA_HUB_MCP_OAUTH_ALGORITHMS", "RS256")),
-            mcp_trusted_proxies=_csv(os.getenv("MY_DATA_HUB_MCP_TRUSTED_PROXIES", "")),
-            mcp_token_max_lifetime_seconds=_int("MY_DATA_HUB_MCP_TOKEN_MAX_LIFETIME_SECONDS", 3600),
-            mcp_operator_profile_enabled=_bool("MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False),
-            mcp_provider_profile_enabled=_bool("MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False),
-            mcp_unified_bootstrap_profile_enabled=_bool("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False),
-            mcp_acceptance_scenarios_enabled=_bool("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False),
-            mcp_control_gateway_url=os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", "").strip(),
+            mcp_oauth_algorithms=_csv(
+                os.getenv("MY_DATA_HUB_MCP_OAUTH_ALGORITHMS", "RS256")
+            ),
+            mcp_trusted_proxies=_csv(
+                os.getenv("MY_DATA_HUB_MCP_TRUSTED_PROXIES", "")
+            ),
+            mcp_token_max_lifetime_seconds=_int(
+                "MY_DATA_HUB_MCP_TOKEN_MAX_LIFETIME_SECONDS", 3600
+            ),
+            mcp_operator_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
+            ),
+            mcp_provider_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False
+            ),
+            mcp_unified_bootstrap_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False
+            ),
+            mcp_acceptance_scenarios_enabled=_bool(
+                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False
+            ),
+            mcp_control_gateway_url=os.getenv(
+                "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", ""
+            ).strip(),
             mcp_control_gateway_token_file=(
                 Path(os.environ["MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE"]).expanduser()
                 if os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE")
                 else None
             ),
-            application_database_url=os.getenv("MY_DATA_HUB_APPLICATION_DATABASE_URL", "").strip(),
-            connector_intake_database_url=os.getenv("MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", "").strip(),
-            orchestrator_database_url=os.getenv("MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", "").strip(),
-            canonical_committer_database_url=os.getenv("MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", "").strip(),
+            application_database_url=os.getenv(
+                "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
+            ).strip(),
+            connector_intake_database_url=os.getenv(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", ""
+            ).strip(),
+            orchestrator_database_url=os.getenv(
+                "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", ""
+            ).strip(),
+            canonical_committer_database_url=os.getenv(
+                "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", ""
+            ).strip(),
+            google_youtube_enabled=_bool("MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED", False),
+            google_youtube_model=os.getenv(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL", "gemini-3.6-flash"
+            ).strip(),
+            google_youtube_allowed_models=_csv(
+                os.getenv(
+                    "MY_DATA_HUB_GOOGLE_YOUTUBE_ALLOWED_MODELS",
+                    "gemini-3.6-flash,gemini-3.7-flash",
+                )
+            ),
+            google_youtube_connect_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_CONNECT_TIMEOUT_SECONDS", 30
+            ),
+            google_youtube_first_event_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_FIRST_EVENT_TIMEOUT_SECONDS", 120
+            ),
+            google_youtube_idle_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_IDLE_TIMEOUT_SECONDS", 300
+            ),
+            google_youtube_total_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_TOTAL_TIMEOUT_SECONDS", 1800
+            ),
+            google_youtube_max_raw_sse_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RAW_SSE_BYTES", 4_194_304
+            ),
+            google_youtube_max_model_output_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_MODEL_OUTPUT_BYTES", 1_048_576
+            ),
+            google_youtube_max_result_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESULT_BYTES", 2_097_152
+            ),
+            google_youtube_max_output_tokens=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_OUTPUT_TOKENS", 8192
+            ),
+            google_youtube_default_store=_bool(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_DEFAULT_STORE", False
+            ),
+            google_ai_limiter_supabase_url=os.getenv(
+                "GOOGLE_AI_LIMITER_SUPABASE_URL", ""
+            ).strip(),
+            google_ai_limiter_supabase_service_key=os.getenv(
+                "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY", ""
+            ).strip(),
+            google_ai_normal_key_envs=_csv(os.getenv("GOOGLE_AI_NORMAL_KEY_ENVS", "")),
+            showcase_enabled=_bool("MY_DATA_HUB_SHOWCASE_ENABLED", False),
         )
         settings.validate()
         return settings
@@ -179,9 +287,13 @@ class Settings:
         if not 1 <= self.mcp_port <= 65535:
             raise ConfigurationError("MY_DATA_HUB_MCP_PORT must be a valid TCP port")
         if not 1024 <= self.worker_result_max_bytes <= 64 * 1024 * 1024:
-            raise ConfigurationError("MY_DATA_HUB_WORKER_RESULT_MAX_BYTES must be between 1 KiB and 64 MiB")
+            raise ConfigurationError(
+                "MY_DATA_HUB_WORKER_RESULT_MAX_BYTES must be between 1 KiB and 64 MiB"
+            )
         if not 1024 <= self.connector_intake_max_bytes <= 16 * 1024 * 1024:
-            raise ConfigurationError("MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES must be between 1 KiB and 16 MiB")
+            raise ConfigurationError(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES must be between 1 KiB and 16 MiB"
+            )
         if self.orchestrator_interval_seconds < 1:
             raise ConfigurationError("orchestrator interval must be positive")
         if not 1 <= self.orchestrator_batch_size <= 500:
@@ -192,7 +304,9 @@ class Settings:
             raise ConfigurationError(f"unsupported MCP auth mode: {self.mcp_auth_mode}")
         if self.environment in {"prod", "production"}:
             if self.mcp_auth_mode == "development-token":
-                raise ConfigurationError("development-token MCP authentication is forbidden in production")
+                raise ConfigurationError(
+                    "development-token MCP authentication is forbidden in production"
+                )
             if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
                 raise ConfigurationError("production remote MCP requires OAuth")
             configured_runtime_urls = tuple(
@@ -212,7 +326,9 @@ class Settings:
                 )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
-        provider_only_scopes = frozenset({"platform:read", "provider:read", "provider:write"})
+        provider_only_scopes = frozenset(
+            {"platform:read", "provider:read", "provider:write"}
+        )
         if self.mcp_provider_profile_enabled and (
             self.mcp_operator_profile_enabled
             or not self.mcp_write_enabled
@@ -238,6 +354,10 @@ class Settings:
                 "region-talk:read",
             }
         )
+        if self.google_youtube_enabled:
+            unified_bootstrap_scopes |= {"youtube:analyze"}
+        if self.showcase_enabled:
+            unified_bootstrap_scopes |= {"showcase:read", "showcase:write"}
         if self.mcp_unified_bootstrap_profile_enabled and (
             self.mcp_operator_profile_enabled
             or self.mcp_provider_profile_enabled
@@ -259,8 +379,6 @@ class Settings:
             "embedding:read",
             "bloggers:read",
             "data:read",
-            # Retained only for local compatibility with the pre-reset semantic
-            # catalog. Operational MCP tools use the explicit scopes above.
             "hub:read",
             "orchestrator:read",
             "region-talk:read",
@@ -280,13 +398,16 @@ class Settings:
             "bloggers:write",
             "region-talk:operate",
             "provider:write",
+            "youtube:analyze",
             "showcase:write",
         }
         if self.mcp_remote_enabled and (
             (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)
             or (self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes | remote_write_scopes)
         ):
-            raise ConfigurationError("remote MCP scopes exceed the selected reader or guarded owner/operator profile")
+            raise ConfigurationError(
+                "remote MCP scopes exceed the selected reader or guarded owner/operator profile"
+            )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "oauth":
             oauth_values = {
                 "MY_DATA_HUB_MCP_OAUTH_ISSUER": self.mcp_oauth_issuer,
@@ -296,7 +417,9 @@ class Settings:
             }
             missing = sorted(name for name, value in oauth_values.items() if not value)
             if missing:
-                raise ConfigurationError("production OAuth configuration is incomplete: " + ", ".join(missing))
+                raise ConfigurationError(
+                    "production OAuth configuration is incomplete: " + ", ".join(missing)
+                )
             if not self.mcp_oauth_jwks_url.startswith("https://"):
                 raise ConfigurationError("OAuth JWKS URL must use HTTPS")
             issuer = urlsplit(self.mcp_oauth_issuer)
@@ -318,15 +441,21 @@ class Settings:
                 or resource.query
                 or resource.fragment
             ):
-                raise ConfigurationError("OAuth resource must be an HTTPS URL without credentials, query, or fragment")
+                raise ConfigurationError(
+                    "OAuth resource must be an HTTPS URL without credentials, query, or fragment"
+                )
             if self.mcp_oauth_audience != self.mcp_oauth_resource:
                 raise ConfigurationError("OAuth audience must equal the exact protected resource")
             resource_authority = resource.hostname or ""
             if resource.port not in {None, 443}:
                 resource_authority = f"{resource_authority}:{resource.port}"
-            allowed_authorities = {value.casefold().removesuffix(":443") for value in self.mcp_allowed_hosts}
+            allowed_authorities = {
+                value.casefold().removesuffix(":443") for value in self.mcp_allowed_hosts
+            }
             if resource_authority.casefold().removesuffix(":443") not in allowed_authorities:
-                raise ConfigurationError("OAuth resource authority must be present in the MCP Host allowlist")
+                raise ConfigurationError(
+                    "OAuth resource authority must be present in the MCP Host allowlist"
+                )
             allowed_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384"}
             if not self.mcp_oauth_algorithms or not set(self.mcp_oauth_algorithms) <= allowed_algorithms:
                 raise ConfigurationError("OAuth algorithms must be an asymmetric allowlist")
@@ -372,7 +501,80 @@ class Settings:
             "bloggers:write",
             "region-talk:operate",
             "provider:write",
+            "youtube:analyze",
+            "showcase:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")
         if self.production_publish_enabled and self.environment not in {"prod", "production"}:
             raise ConfigurationError("production publication may be enabled only in production")
+        self._validate_google_youtube()
+
+    def _validate_google_youtube(self) -> None:
+        if not self.google_youtube_allowed_models or len(set(self.google_youtube_allowed_models)) != len(
+            self.google_youtube_allowed_models
+        ):
+            raise ConfigurationError("YouTube model allowlist must be non-empty and unique")
+        if self.google_youtube_model not in self.google_youtube_allowed_models:
+            raise ConfigurationError("default YouTube model must be in the server allowlist")
+        timeout_values = (
+            self.google_youtube_connect_timeout_seconds,
+            self.google_youtube_first_event_timeout_seconds,
+            self.google_youtube_idle_timeout_seconds,
+        )
+        if any(not 1 <= value <= 900 for value in timeout_values):
+            raise ConfigurationError("YouTube stream timeouts must be between 1 and 900 seconds")
+        if not 60 <= self.google_youtube_total_timeout_seconds <= 3600 or (
+            self.google_youtube_total_timeout_seconds < max(timeout_values)
+        ):
+            raise ConfigurationError(
+                "YouTube total operation deadline must be between 60 and 3600 seconds "
+                "and cover each stream timeout"
+            )
+        if not 65_536 <= self.google_youtube_max_raw_sse_bytes <= 8_388_608:
+            raise ConfigurationError("YouTube raw SSE limit must be between 64 KiB and 8 MiB")
+        if not 65_536 <= self.google_youtube_max_model_output_bytes <= self.google_youtube_max_raw_sse_bytes:
+            raise ConfigurationError("YouTube model-output limit must be between 64 KiB and the raw SSE limit")
+        if not self.google_youtube_max_model_output_bytes <= self.google_youtube_max_result_bytes <= 2_097_152:
+            raise ConfigurationError("YouTube MCP result limit must cover model output and not exceed 2 MiB")
+        if not 256 <= self.google_youtube_max_output_tokens <= 65_536:
+            raise ConfigurationError("YouTube output-token cap must be between 256 and 65536")
+        if self.google_youtube_default_store:
+            raise ConfigurationError("the first YouTube release requires store=false")
+        env_name = re.compile(r"^[A-Z][A-Z0-9_]{1,127}$")
+        if any(not env_name.fullmatch(name) for name in self.google_ai_normal_key_envs):
+            raise ConfigurationError("GOOGLE_AI_NORMAL_KEY_ENVS contains an invalid ENV variable name")
+        if len(set(self.google_ai_normal_key_envs)) != len(self.google_ai_normal_key_envs):
+            raise ConfigurationError("GOOGLE_AI_NORMAL_KEY_ENVS must not contain duplicates")
+        dedicated = (
+            bool(self.google_ai_limiter_supabase_url),
+            bool(self.google_ai_limiter_supabase_service_key),
+            bool(self.google_ai_normal_key_envs),
+        )
+        if any(dedicated) and not all(dedicated):
+            raise ConfigurationError("dedicated Google AI limiter configuration is partial")
+        if self.google_ai_limiter_supabase_url:
+            limiter = urlsplit(self.google_ai_limiter_supabase_url)
+            if (
+                limiter.scheme != "https"
+                or not limiter.hostname
+                or limiter.username is not None
+                or limiter.password is not None
+                or limiter.query
+                or limiter.fragment
+            ):
+                raise ConfigurationError("Google AI limiter URL must be a canonical HTTPS origin")
+        if self.google_youtube_enabled and (
+            not all(dedicated)
+            or not self.mcp_remote_enabled
+            or not self.mcp_write_enabled
+            or not (
+                self.mcp_operator_profile_enabled
+                or self.mcp_unified_bootstrap_profile_enabled
+            )
+            or self.mcp_provider_profile_enabled
+            or "youtube:analyze" not in self.mcp_scopes
+        ):
+            raise ConfigurationError(
+                "YouTube analysis requires an exclusive remote owner profile, youtube:analyze, "
+                "write opt-in, and the dedicated shared limiter"
+            )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 import yaml
 
+from my_data_hub.config import Settings
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,3 +50,41 @@ def test_full_link_tool_is_not_in_reader_profile() -> None:
     assert contract.scope == "showcase:write"
     assert contract.role == "operator"
     assert contract.read_only is True
+
+
+def test_unified_profile_accepts_exact_showcase_owner_scope_extension(
+    monkeypatch, tmp_path: Path
+) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("MY_DATA_HUB_"):
+            monkeypatch.delenv(name, raising=False)
+    scopes = {
+        "platform:read",
+        "master:read",
+        "operation:read",
+        "checkpoint:read",
+        "embedding:read",
+        "provider:read",
+        "bloggers:read",
+        "region-talk:read",
+        "provider:write",
+        "showcase:read",
+        "showcase:write",
+    }
+    token = tmp_path / "gateway.token"
+    token.write_text("g" * 32, encoding="ascii")
+    token.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_REMOTE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_AUTH_MODE", "development-token")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN", "test-only")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", ",".join(sorted(scopes)))
+    monkeypatch.setenv("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", "http://control-plane:8080/internal/mcp-provider/invoke")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(token))
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_ENABLED", "true")
+
+    settings = Settings.from_env(require_database=False)
+    assert settings.showcase_enabled is True
+    assert {"showcase:read", "showcase:write"} <= settings.mcp_scopes

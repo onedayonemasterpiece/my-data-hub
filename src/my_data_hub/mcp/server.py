@@ -213,7 +213,10 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
     if dependencies.provider_only_profile_enabled:
         names &= PROVIDER_ONLY_TOOLS
     if dependencies.unified_bootstrap_profile_enabled:
-        names &= UNIFIED_BOOTSTRAP_TOOLS
+        unified_tools = UNIFIED_BOOTSTRAP_TOOLS
+        if dependencies.showcase_manager is not None:
+            unified_tools |= _SHOWCASE_TOOL_NAMES
+        names &= unified_tools
     if dependencies.reader_profile_enabled:
         names &= READER_PROFILE_TOOLS
     return names

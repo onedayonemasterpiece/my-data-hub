@@ -6,7 +6,7 @@ services:
       MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE: /run/secrets/showcase-gateway.key
       MY_DATA_HUB_MCP_SCOPES: "${MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE:?set the existing MCP scopes plus showcase:read and showcase:write}"
     volumes:
-      - "${MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE:?set an absolute 0600 service-token path}:/run/secrets/showcase-gateway.key:ro"
+      - "${MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE:?set an absolute 0600 edge-token path}:/run/secrets/showcase-gateway.key:ro"
     depends_on:
       showcase-runtime:
         condition: service_healthy
@@ -36,13 +36,19 @@ services:
       MY_DATA_HUB_SHOWCASE_RUNTIME_HOST: 127.0.0.1
       MY_DATA_HUB_SHOWCASE_RUNTIME_PORT: "${MY_DATA_HUB_SHOWCASE_RUNTIME_PORT:-8790}"
       MY_DATA_HUB_SHOWCASE_RUNTIME_TOKEN_FILE: /run/secrets/showcase-gateway.key
+      MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE: /run/secrets/idea-hub-deploy-key
+      MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE: /run/config/github-known-hosts
       MY_DATA_HUB_SHOWCASE_OPERATION_JOURNAL: /var/lib/my-data-hub-showcase/showcase-operations.json
+      MY_DATA_HUB_SHOWCASE_LOCAL_PUBLISH_ROOT: /var/www/showcase
       MY_DATA_HUB_SHOWCASE_SITE_TEMPLATE_DIR: /opt/showcase-site
       MY_DATA_HUB_SHOWCASE_SITE_DIR: /work/showcase-site
       MY_DATA_HUB_ARTIFACT_ROOT: /var/lib/my-data-hub-showcase
     volumes:
-      - "${MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE:?set an absolute 0600 service-token path}:/run/secrets/showcase-gateway.key:ro"
-      - showcase-state:/var/lib/my-data-hub-showcase
+      - "${MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE:?set an absolute 0600 runtime-token path}:/run/secrets/showcase-gateway.key:ro"
+      - "${MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE:?set an absolute 0600 read-only deploy-key path}:/run/secrets/idea-hub-deploy-key:ro"
+      - "${MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE:?set an absolute GitHub known-hosts path}:/run/config/github-known-hosts:ro"
+      - "${MY_DATA_HUB_SHOWCASE_PUBLIC_DIR:?set an absolute persistent public directory}:/var/www/showcase"
+      - "${MY_DATA_HUB_SHOWCASE_STATE_DIR:?set an absolute private persistent state directory}:/var/lib/my-data-hub-showcase"
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
       - /run:rw,noexec,nosuid,nodev,size=16m,mode=755
@@ -58,6 +64,28 @@ services:
       retries: 12
       start_period: 20s
 
-volumes:
-  showcase-state:
-    name: "${MY_DATA_HUB_SHOWCASE_STATE_VOLUME:-my-data-hub-showcase-state}"
+  showcase-static:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    init: true
+    user: "101:101"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: "0.25"
+    volumes:
+      - "${MY_DATA_HUB_SHOWCASE_PUBLIC_DIR:?set an absolute persistent public directory}:/var/www/showcase:ro"
+      - ./deploy/showcase-runtime/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8791/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s

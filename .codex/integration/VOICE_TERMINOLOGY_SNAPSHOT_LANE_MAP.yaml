@@ -1,0 +1,91 @@
+mode: serial_integrator
+repo: onedayonemasterpiece/my-data-hub
+base_ref: 5475ae68314be94fd473a7cd6db7f95eac519d44
+base_branch: feat/record-idea-hub-voice-proxy
+integration_branch: integration/record-idea-hub-voice-intake
+global_constraints:
+  - reuse existing control-plane and idea-hub/main
+  - no credential or transcript disclosure
+  - no stale terminology presented as current
+verification_owner: root
+stop_conditions:
+  - current idea-hub/main cannot be resolved or read back
+  - live acceptance cannot prove exact card commit and atomic index commit
+lanes:
+  - id: AUDIT-CODE
+    role: planner
+    requirement_ids: [R1, R2, R3, R4]
+    target: current code/session/cache data flow
+    depends_on: []
+    execution_mode: parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake
+    writable_files: []
+    forbidden_files: ['*']
+    expected_output: root-cause report with test seams
+    verification_scope: inspection_only
+    effort: high
+    status: spawned
+  - id: AUDIT-LIVE
+    role: planner
+    requirement_ids: [R1, R6, R7]
+    target: running devstand and current IdeaHub card revision
+    depends_on: []
+    execution_mode: parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake
+    writable_files: []
+    forbidden_files: ['*']
+    expected_output: sanitized runtime evidence
+    verification_scope: inspection_only
+    effort: high
+    status: spawned
+  - id: INTEGRATE
+    role: worker
+    requirement_ids: [R2, R3, R4, R5]
+    target: session-scoped terminology snapshot contract
+    depends_on: [AUDIT-CODE, AUDIT-LIVE]
+    execution_mode: serial_after_dependency
+    branch: integration/record-idea-hub-voice-intake
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake
+    writable_files:
+      - src/my_data_hub/voice_intake/**
+      - tests/voice_intake/**
+      - docs/operations/record-idea-hub-voice-intake.md
+      - .codex/integration/**
+    forbidden_files:
+      - sql/**
+      - schemas/**
+      - architecture/**
+    expected_output: committed implementation and tests
+    verification_scope: full_local
+    effort: extra-high
+    status: planned
+  - id: DEPLOY-ACCEPT
+    role: worker
+    requirement_ids: [R6, R7]
+    target: devstand rollout and real voice/readback acceptance
+    depends_on: [INTEGRATE]
+    execution_mode: serial_after_dependency
+    branch: integration/record-idea-hub-voice-intake
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake
+    writable_files: [.codex/integration/**]
+    forbidden_files: [src/**, tests/**]
+    expected_output: deployment and GitHub commit/readback evidence
+    verification_scope: full_local
+    effort: extra-high
+    status: planned
+  - id: CLOSURE-REVIEW
+    role: reviewer
+    requirement_ids: [R1, R2, R3, R4, R5, R6, R7]
+    target: requirement-by-requirement final audit
+    depends_on: [DEPLOY-ACCEPT]
+    execution_mode: serial_after_dependency
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake
+    writable_files: []
+    forbidden_files: ['*']
+    expected_output: closure matrix
+    verification_scope: inspection_only
+    effort: high
+    status: planned

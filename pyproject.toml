@@ -32,6 +32,7 @@ dev = [
   "hypothesis>=6.138,<7",
   "mypy>=1.15,<2",
   "ruff>=0.9,<1",
+  "types-PyYAML>=6.0.12.20241230,<7",
 ]
 ydb = ["ydb==3.31.2"]
 kaggle = ["kaggle==2.2.4"]
@@ -67,6 +68,11 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["E501"]
 "scripts/validate_repository.py" = ["E501"]
+# Russian prompts and rendered Markdown intentionally contain Unicode glyphs
+# which RUF001 treats as confusable Latin characters. The import order in the
+# large Gemini adapter is kept grouped by transport/domain responsibility.
+"src/my_data_hub/voice_intake/gemini.py" = ["I001", "RUF001"]
+"src/my_data_hub/voice_intake/markdown.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -79,4 +85,27 @@ files = [
   "src/my_data_hub/mcp/contracts.py",
   "src/my_data_hub/orchestrator/master/evidence.py",
   "src/my_data_hub/orchestrator/master/provider.py",
+  "src/my_data_hub/voice_intake/*.py",
+  "src/my_data_hub/voice_intake_v2/*.py",
 ]
+
+# The repository deliberately skips imported implementation bodies. FastAPI and
+# Pydantic decorators/base classes are therefore seen as Any at this boundary;
+# suppress only those external-typing artefacts while retaining strict checking
+# for every function body and data-flow error in the voice package.
+[[tool.mypy.overrides]]
+module = [
+  "my_data_hub.voice_intake.api",
+  "my_data_hub.voice_intake.contracts",
+  "my_data_hub.voice_intake_v2.api",
+  "my_data_hub.voice_intake_v2.contracts",
+]
+disable_error_code = ["misc", "untyped-decorator"]
+
+[[tool.mypy.overrides]]
+module = "my_data_hub.voice_intake.gemini"
+disable_error_code = ["misc", "no-untyped-def"]
+
+[[tool.mypy.overrides]]
+module = "my_data_hub.voice_intake.github"
+disable_error_code = ["assignment"]

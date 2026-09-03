@@ -3,7 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import shlex
+import stat
+import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -152,3 +157,85 @@ class GitHubShowcaseSource:
                 raise ShowcaseSourceError(f"item id mismatch: requested {item_id}, found {item.id}")
             items.append(item)
         return ShowcaseBundle(source_revision=revision, view=view, items=items)
+
+
+class GitSshShowcaseSource:
+    """Read an exact private-repository revision through a read-only deploy key."""
+
+    def __init__(
+        self,
+        *,
+        key_file: Path,
+        known_hosts_file: Path,
+        repository: str = "onedayonemasterpiece/idea-hub",
+        ref: str = "main",
+        root: str = "showcase",
+        timeout_seconds: int = 60,
+    ) -> None:
+        if "/" not in repository or any(char.isspace() for char in repository):
+            raise ValueError("repository must be owner/name")
+        self.key_file = key_file.expanduser().resolve()
+        self.known_hosts_file = known_hosts_file.expanduser().resolve()
+        for path, private in ((self.key_file, True), (self.known_hosts_file, False)):
+            try:
+                file_stat = path.stat()
+            except OSError as exc:
+                raise ValueError(f"Git SSH credential file is unavailable: {path.name}") from exc
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError(f"Git SSH credential path must be a regular file: {path.name}")
+            if private and stat.S_IMODE(file_stat.st_mode) & 0o077:
+                raise ValueError("Git SSH private key must have mode 0600")
+        self.repository = repository
+        self.ref = ref
+        self.root = root.strip("/")
+        self.timeout_seconds = timeout_seconds
+
+    def _run(self, argv: list[str], *, cwd: Path, env: dict[str, str]) -> str:
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ShowcaseSourceError("Git SSH source command failed") from exc
+        if result.returncode != 0:
+            raise ShowcaseSourceError(f"Git SSH source command failed: {argv[0]} {argv[1]}")
+        return result.stdout.strip()
+
+    def load_bundle(self, view_id: str) -> ShowcaseBundle:
+        ssh_command = shlex.join(
+            [
+                "ssh",
+                "-i",
+                str(self.key_file),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={self.known_hosts_file}",
+            ]
+        )
+        env = {**os.environ, "GIT_SSH_COMMAND": ssh_command}
+        with TemporaryDirectory(prefix="showcase-git-source-") as temp:
+            checkout = Path(temp)
+            self._run(["git", "init", "--quiet"], cwd=checkout, env=env)
+            self._run(
+                ["git", "remote", "add", "origin", f"git@github.com:{self.repository}.git"],
+                cwd=checkout,
+                env=env,
+            )
+            self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout, env=env)
+            revision = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout, env=env)
+            if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+                raise ShowcaseSourceError("Git SSH source did not resolve an exact commit SHA")
+            self._run(["git", "checkout", "--quiet", "--detach", revision], cwd=checkout, env=env)
+            bundle = FilesystemShowcaseSource(checkout / self.root).load_bundle(view_id)
+            return bundle.model_copy(update={"source_revision": revision})

@@ -477,8 +477,8 @@ class MasterCoordinator:
             # it without writing a second projection.
             return receipt
         operation = self._operation_for_attempt(event.run_id, event.attempt_id)
-        expected_source_sha256 = self._expected_executed_source_sha256(operation.operation_id)
         if event.event_type == RuntimeEventType.SERVICE_READY:
+            expected_source_sha256 = self._expected_executed_source_sha256(operation.operation_id)
             if operation.state != MasterState.REGISTERING.value:
                 return receipt
             data = event.data
@@ -623,6 +623,7 @@ class MasterCoordinator:
                 event_id=event.event_id,
             )
         elif event.event_type == RuntimeEventType.RUNTIME_TERMINAL:
+            expected_source_sha256 = self._expected_executed_source_sha256(operation.operation_id)
             observed_source_sha256 = str(event.data.get("executed_source_sha256", ""))
             if expected_source_sha256 is not None and not hmac.compare_digest(
                 expected_source_sha256, observed_source_sha256

@@ -14,6 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MY_DATA_HUB_SHOWCASE_SITE_DIR=/work/showcase-site \
     MY_DATA_HUB_ARTIFACT_ROOT=/var/lib/my-data-hub-showcase
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \

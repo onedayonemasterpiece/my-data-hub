@@ -14,6 +14,7 @@ def test_remote_mcp_receives_only_showcase_gateway_configuration() -> None:
     remote_section, runtime_section = source.split("\n  showcase-runtime:\n", maxsplit=1)
     assert "MY_DATA_HUB_SHOWCASE_GATEWAY_URL" in remote_section
     assert "MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE" in remote_section
+    assert "MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE" in remote_section
     for forbidden in (
         "GITHUB_TOKEN",
         "PUBLISH_COMMAND",
@@ -24,8 +25,11 @@ def test_remote_mcp_receives_only_showcase_gateway_configuration() -> None:
     ):
         assert forbidden not in remote_section
     assert "MY_DATA_HUB_SHOWCASE_RUNTIME_ENV_FILE" in runtime_section
+    assert "MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE" in runtime_section
+    assert "MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE" in runtime_section
     assert "MY_DATA_HUB_SHOWCASE_SITE_TEMPLATE_DIR" in runtime_section
-    assert "showcase-state" in runtime_section
+    assert "MY_DATA_HUB_SHOWCASE_STATE_DIR" in runtime_section
+    assert "showcase-static" in runtime_section
 
 
 def test_showcase_runtime_image_contains_renderer_but_mcp_image_stays_unchanged() -> None:

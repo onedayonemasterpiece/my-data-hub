@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 
 from my_data_hub.control_plane.adapters import ControlLedgerOAuthAuthority
 from my_data_hub.control_plane.ledger import ControlLedger
-from my_data_hub.mcp.catalog import ALL_SCOPES, READER_PROFILE_SCOPES
+from my_data_hub.mcp.catalog import READER_PROFILE_SCOPES
+from my_data_hub.mcp.youtube_catalog import ALL_SCOPES
 
 from .app import OAuthHTTPPolicy, create_authorization_app
 from .client_metadata import ChatGPTClientMetadataResolver

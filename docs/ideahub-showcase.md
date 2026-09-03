@@ -49,6 +49,8 @@ entry point for focused contract testing.
 |---|---|
 | `MY_DATA_HUB_SHOWCASE_ENABLED` | Enables the six tools in the standard my-data-hub MCP catalog. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN` | Read-only token for private `idea-hub` source files. |
+| `MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE` | Preferred production credential: private half of a repository-scoped, read-only GitHub deploy key. |
+| `MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE` | Pinned GitHub SSH host keys used with the deploy key. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY` | Defaults to `onedayonemasterpiece/idea-hub`. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_REF` | Defaults to `main`; every build resolves it to one exact commit. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_ROOT` | Defaults to `showcase`. |
@@ -58,8 +60,11 @@ entry point for focused contract testing.
 | `MY_DATA_HUB_SHOWCASE_PUBLISH_COMMAND_JSON` | JSON argv template for checked artifact publication. |
 | `MY_DATA_HUB_SHOWCASE_REVOKE_COMMAND_JSON` | JSON argv template for removing or disabling a prefix. |
 
-For development, set `MY_DATA_HUB_SHOWCASE_SOURCE_ROOT` and
-`MY_DATA_HUB_SHOWCASE_LOCAL_PUBLISH_ROOT`; no GitHub or bucket credentials are then used.
+For development, set `MY_DATA_HUB_SHOWCASE_SOURCE_ROOT`. The production DevCoveer
+deployment also uses `MY_DATA_HUB_SHOWCASE_LOCAL_PUBLISH_ROOT`, but only inside the
+isolated runtime and only against the private bind directory served read-only by the
+dedicated loopback `showcase-static` service. No publisher credential is needed or
+exposed to the public MCP edge.
 
 Publisher command templates are arrays, not shell strings. Supported placeholders are
 `{source}`, `{prefix}`, `{slug}` and `{view_id}`. Example shape:

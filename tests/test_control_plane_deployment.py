@@ -24,6 +24,33 @@ def test_control_plane_image_includes_all_wheel_force_include_roots() -> None:
     assert "install -d -o mdh -g mdh -m 0711 /state" in source
 
 
+def test_voice_v2_media_tools_and_private_spool_are_bounded_to_control_plane() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "apt-get install --yes --no-install-recommends ffmpeg" in dockerfile
+    assert "command -v ffmpeg >/dev/null" in dockerfile
+    assert "command -v ffprobe >/dev/null" in dockerfile
+
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    control = services["control-plane"]
+    spool_binding = "${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:-./.state/voice-intake-v2}:/voice-intake-v2"
+    assert control["read_only"] is True
+    assert control["environment"]["MY_DATA_HUB_VOICE_INTAKE_V2_SPOOL"] == "/voice-intake-v2"
+    assert spool_binding in control["volumes"]
+    for name, service in services.items():
+        if name != "control-plane":
+            assert not any("voice-intake-v2" in volume for volume in service.get("volumes", []))
+
+    installer = installer_source()
+    assert 'voice_v2_spool_dir="${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:-$runtime_root/voice-intake-v2}"' in installer
+    assert 'mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir"' in installer
+    assert 'private_dirs=("$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir")' in installer
+    assert '[[ ! -L "$private_dir" ]]' in installer
+    assert '"$(stat -c \'%u\' "$private_dir")" != "$runtime_uid"' in installer
+    assert '"$(stat -c \'%a\' "$private_dir")" != "700"' in installer
+    assert "MY_DATA_HUB_VOICE_V2_SPOOL_DIR=$voice_v2_spool_dir" in installer
+
+
 def provider_oauth_client_probe_source() -> str:
     source = installer_source()
     marker = 'provider_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'
@@ -271,6 +298,59 @@ def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> Non
     assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
     assert "acceptance:operate" not in operator_override
     assert "migration:operate" not in operator_override
+
+
+def test_google_youtube_operator_profile_is_separate_explicit_and_rollbackable() -> None:
+    source = installer_source()
+    assert "MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS" in source
+    assert "I_ACKNOWLEDGE_SHARED_GOOGLE_AI_QUOTA" in source
+    assert 'google_youtube_override="$runtime_root/google-youtube.$commit.yaml"' in source
+    operator_start = source.index('cat > "$operator_override"')
+    operator_end = source.index('chmod 600 "$operator_override"', operator_start)
+    operator_override = source[operator_start:operator_end]
+    assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "false"' in operator_override
+    start = source.index('cat > "$google_youtube_override"')
+    end = source.index('chmod 600 "$google_youtube_override"', start)
+    youtube_override = source[start:end]
+    assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"' in youtube_override
+    assert "MY_DATA_HUB_MCP_SCOPES:" in youtube_override
+    assert "youtube:analyze" in source
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES:" in youtube_override
+    assert 'google_youtube_compose_arg=" -f $google_youtube_override"' in source
+    assert source.count("$google_youtube_compose_arg") >= 3
+    assert (
+        "Google YouTube analysis and protected acceptance scenarios require separate operator installs"
+        in source
+    )
+
+
+def test_google_youtube_analysis_can_use_bounded_unified_profile_without_operator_gate() -> None:
+    source = installer_source()
+    assert '"$operator_profile" != true && "$unified_bootstrap" != true' in source
+    start = source.index('if [[ "$google_youtube_analysis" == true ]]; then')
+    end = source.index('acceptance_scenarios_override=""', start)
+    youtube_block = source[start:end]
+    assert 'if [[ "$unified_bootstrap" == true ]]; then' in youtube_block
+    bounded_scopes = (
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,"
+        "bloggers:read,region-talk:read,provider:write,youtube:analyze"
+    )
+    assert f'youtube_mcp_scopes="{bounded_scopes}"' in youtube_block
+    assert 'youtube_oauth_scopes="openid,offline_access,$youtube_mcp_scopes"' in youtube_block
+    assert "MY_DATA_HUB_MCP_SCOPES: $youtube_mcp_scopes" in youtube_block
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: $youtube_oauth_scopes" in youtube_block
+
+    compose_start = source.index('compose_files=(-f "$release/compose.control-plane.yaml")')
+    compose_end = source.index('compose=("$docker_path" compose', compose_start)
+    compose_block = source[compose_start:compose_end]
+    assert compose_block.index('if [[ -n "$unified_bootstrap_override" ]]') < compose_block.index(
+        'if [[ -n "$google_youtube_override" ]]'
+    )
+
+    exec_start = next(line for line in source.splitlines() if line.startswith("ExecStart="))
+    assert exec_start.index("$unified_bootstrap_compose_arg") < exec_start.index(
+        "$google_youtube_compose_arg"
+    )
 
 
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
