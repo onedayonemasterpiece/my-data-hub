@@ -163,6 +163,12 @@ def patch_unified_bootstrap_test() -> None:
         '    assert catalog == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}\n',
         "unified bootstrap optional Showcase expectation",
     )
+    source = replace_once(
+        source,
+        '    } == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()\n',
+        '    } == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}\n',
+        "unified bootstrap HTTP optional Showcase expectation",
+    )
     write(path, source)
 
 
