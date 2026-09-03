@@ -37,6 +37,7 @@ jobs:
           docs/operations/ideahub-showcase-runtime.md
           src/my_data_hub/mcp/catalog.py
           src/my_data_hub/mcp/server.py
+          tests/mcp/test_remote_runtime.py
           tests/showcase/test_env_contract_v2.py
           tests/test_architecture_invariants.py
           tests/test_remote_mcp_verifier.py
