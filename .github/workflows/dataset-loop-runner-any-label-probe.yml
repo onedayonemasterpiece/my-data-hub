@@ -1,46 +1,16 @@
-name: dataset-loop-runner-any-label-probe
+name: dataset-loop-runner-probe-disabled
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "ops/dataset-loop-mcp/runner-any-label-request.json"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  probe:
-    runs-on: self-hosted
-    timeout-minutes: 5
+  prohibited:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Record sanitized runner identity and DevCoveer capability
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, shutil, socket
-          result = {
-              "schema_version": 1,
-              "status": "RUNNER_ONLINE",
-              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
-              "runner_name_sha256": hashlib.sha256(os.environ.get("RUNNER_NAME", "").encode()).hexdigest(),
-              "host_sha256": hashlib.sha256(socket.gethostname().encode()).hexdigest(),
-              "runner_os": os.environ.get("RUNNER_OS"),
-              "runner_arch": os.environ.get("RUNNER_ARCH"),
-              "commands": {name: shutil.which(name) is not None for name in ("systemctl", "nginx", "certbot", "kaggle", "gh", "sudo")},
-              "devcoveer_state_present": (pathlib.Path.home() / ".local/state/my-data-hub-control-plane").exists(),
-          }
-          pathlib.Path("ops/dataset-loop-mcp/runner-any-label.completed.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-          PY
-      - name: Commit remote readback marker
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ops/dataset-loop-mcp/runner-any-label.completed.json
-          git commit -m "evidence: identify available self-hosted runner"
-          git pull --rebase origin main
-          git push origin HEAD:main
+      - run: |
+          echo 'Owner-hosted GitHub Actions runners are not authorized for Dataset Loop MCP.' >&2
+          echo 'Do not install, register, recover, or probe a self-hosted runner.' >&2
+          exit 78
