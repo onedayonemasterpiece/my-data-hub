@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from my_data_hub.mcp.catalog import TOOL_CONTRACTS
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -42,5 +44,7 @@ def test_full_link_tool_is_not_in_reader_profile() -> None:
     profile = server[start:end]
     assert '"showcase.list"' in profile
     assert '"showcase.get_link"' not in profile
-    catalog = (ROOT / "src/my_data_hub/mcp/catalog.py").read_text(encoding="utf-8")
-    assert '("showcase.get_link", "showcase:write")' in catalog
+    contract = TOOL_CONTRACTS["showcase.get_link"]
+    assert contract.scope == "showcase:write"
+    assert contract.role == "operator"
+    assert contract.read_only is True

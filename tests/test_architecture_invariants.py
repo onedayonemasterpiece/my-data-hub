@@ -146,13 +146,20 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
     } == {
         "compose.yaml",
         "compose.control-plane.yaml",
+        "compose.showcase.yaml",
     }
     workflow_directory = ROOT / ".github/workflows"
     assert {
         path.name
         for path in workflow_directory.iterdir()
         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
-    } == {"ci.yml", "nightly.yml", "post-deploy.yml", "provider-real.yml"}
+    } == {
+        "ci.yml",
+        "ideahub-showcase.yml",
+        "nightly.yml",
+        "post-deploy.yml",
+        "provider-real.yml",
+    }
     for path in repository_files:
         if path.suffix.lower() not in {".yml", ".yaml"}:
             continue
@@ -164,6 +171,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
             assert path.relative_to(ROOT).as_posix() in {
                 "compose.yaml",
                 "compose.control-plane.yaml",
+                "compose.showcase.yaml",
             }
     assert "volumes" not in load_yaml("compose.yaml")["services"]["postgres"]
     assert {
@@ -176,6 +184,8 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",
+        "deploy/showcase-runtime/Dockerfile",
+        "deploy/showcase-runtime/runtime.env.example",
         "deploy/local-edge/README.md",
         "deploy/yandex-edge/README.md",
         "deploy/yandex-edge/autossh.service",
