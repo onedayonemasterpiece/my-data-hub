@@ -1,0 +1,7 @@
+{
+  "canonical_mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+  "release_tag": "v0.1.0-alpha.3",
+  "requested_at": "2026-09-03",
+  "schema_version": 1,
+  "scope": "wait for immutable private release, fresh DevCoveer preflight, local installation, owner PCT bootstrap, real Kaggle smoke, existing ingress publication, two-slot restart and cancellation acceptance"
+}
