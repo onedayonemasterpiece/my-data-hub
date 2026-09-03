@@ -1,0 +1,121 @@
+name: dataset-loop-mcp-deploy-v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/deploy-v3-request.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dataset-loop-mcp-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require the successful runner probe
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          value = json.loads(pathlib.Path("ops/dataset-loop-mcp/evidence/runner-probe.json").read_text())
+          if value.get("status") != "READY":
+              raise SystemExit(f"runner probe is not READY: {value.get('missing')!r}")
+          PY
+
+      - name: Deploy immutable alpha.3, real Kaggle acceptance and public ingress
+        id: deploy
+        run: python3 ops/dataset-loop-mcp/deploy_entry_v2.py
+
+      - name: Persist terminal result with a fresh run identity
+        if: always()
+        run: |
+          set -euo pipefail
+          succeeded=false
+          if [ "${{ steps.deploy.outcome }}" = success ]; then succeeded=true; fi
+          mkdir -p "$RUNNER_TEMP/deployment-terminal"
+          if [ -s ops/dataset-loop-mcp/evidence/deployment-result.json ]; then
+            cp ops/dataset-loop-mcp/evidence/deployment-result.json "$RUNNER_TEMP/deployment-terminal/deployment-result.json"
+          fi
+          if [ -s ops/dataset-loop-mcp/evidence/deployment-failure.json ]; then
+            cp ops/dataset-loop-mcp/evidence/deployment-failure.json "$RUNNER_TEMP/deployment-terminal/deployment-failure.json"
+          fi
+          if [ -s ops/dataset-loop-mcp/deployment.completed.json ]; then
+            cp ops/dataset-loop-mcp/deployment.completed.json "$RUNNER_TEMP/deployment-terminal/deployment.completed.json"
+          fi
+          git fetch origin main
+          git reset --hard origin/main
+          mkdir -p ops/dataset-loop-mcp/evidence
+          if [ "$succeeded" = true ]; then
+            cp "$RUNNER_TEMP/deployment-terminal/deployment-result.json" ops/dataset-loop-mcp/evidence/deployment-result.json
+            cp "$RUNNER_TEMP/deployment-terminal/deployment.completed.json" ops/dataset-loop-mcp/deployment.completed.json
+            python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          path = pathlib.Path("ops/dataset-loop-mcp/deployment.completed.json")
+          value = json.loads(path.read_text())
+          if value.get("status") != "PUBLIC_INFRASTRUCTURE_READY":
+              raise SystemExit(f"deployment completion is not ready: {value!r}")
+          value["workflow_run_id"] = int(os.environ["GITHUB_RUN_ID"])
+          value["workflow_run_attempt"] = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+          PY
+          else
+            if [ -s "$RUNNER_TEMP/deployment-terminal/deployment-failure.json" ]; then
+              cp "$RUNNER_TEMP/deployment-terminal/deployment-failure.json" ops/dataset-loop-mcp/evidence/deployment-failure.json
+            else
+              cat > ops/dataset-loop-mcp/evidence/deployment-failure.json <<EOF
+          {
+            "schema_version": 1,
+            "status": "FAILED_BEFORE_CONTROLLER_EVIDENCE",
+            "workflow_run_id": ${GITHUB_RUN_ID},
+            "public_mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+            "native_dataset_loop_enabled": false
+          }
+          EOF
+            fi
+            python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          failure = json.loads(pathlib.Path("ops/dataset-loop-mcp/evidence/deployment-failure.json").read_text())
+          pathlib.Path("ops/dataset-loop-mcp/deployment.completed.json").write_text(
+              json.dumps(
+                  {
+                      "schema_version": 1,
+                      "status": failure.get("status", "FAILED"),
+                      "error": failure.get("error"),
+                      "evidence": "ops/dataset-loop-mcp/evidence/deployment-failure.json",
+                      "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+                      "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                      "mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n"
+          )
+          PY
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ops/dataset-loop-mcp/deployment.completed.json ops/dataset-loop-mcp/evidence
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence: record identified Dataset Loop deployment result"
+            git push origin HEAD:main
+          fi
+          expected=$(git rev-parse HEAD)
+          actual=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$actual" = "$expected"
+          if [ "$succeeded" != true ]; then exit 1; fi
