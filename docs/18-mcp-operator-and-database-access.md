@@ -67,7 +67,11 @@ kaggle_operator
 
 A principal sees only tools enabled for its profile and scopes. Disabling the operator
 profile removes operator tools from discovery rather than leaving them callable with a
-runtime error.
+runtime error. The only incremental-authorization exception is documented in
+[`operations/ideahub-showcase-runtime.md`](operations/ideahub-showcase-runtime.md): an
+existing unified owner/operator grant may discover enabled Showcase schemas before the
+new Showcase scopes are added, while execution remains scope-denied and readers remain
+unchanged.
 
 The existing semantic tools remain preferred for recurring operations because they
 encode product invariants and produce stable receipts. The operator profile handles

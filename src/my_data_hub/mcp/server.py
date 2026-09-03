@@ -233,6 +233,33 @@ def _configured_security_schemes(settings: Settings, dependencies: MCPDependenci
     return [{"type": "oauth2", "scopes": scopes}]
 
 
+def _catalog_tool_names(
+    identity: AccessIdentity | None,
+    *,
+    profile_tools: set[str],
+    configured_scopes: frozenset[str],
+) -> frozenset[str]:
+    """Return callable tools plus bounded owner-only incremental-auth discovery.
+
+    ChatGPT refreshes an app by calling ``tools/list`` with its current grant. If
+    a newly deployed tool is hidden solely because that old grant predates the
+    new scope, the client can never discover the action that would trigger an
+    incremental authorization request.  The unified owner/operator grant is
+    identified by its existing ``provider:write`` capability.  It may discover
+    enabled Showcase schemas, but ``call_tool`` continues to require each exact
+    Showcase scope.  Reader grants therefore remain unchanged.
+    """
+
+    allowed = set(visible_tools(identity))
+    if identity is not None and "provider:write" in identity.scopes:
+        allowed.update(
+            name
+            for name in _SHOWCASE_TOOL_NAMES
+            if TOOL_CONTRACTS[name].scope in configured_scopes
+        )
+    return frozenset(allowed & profile_tools)
+
+
 def create_server(
     settings: Settings,
     *,
@@ -267,7 +294,11 @@ def create_server(
 
         async def list_tools(self):  # type: ignore[no-untyped-def]
             tools = await super().list_tools()
-            allowed = visible_tools(self._identity()) & profile_tools
+            allowed = _catalog_tool_names(
+                self._identity(),
+                profile_tools=profile_tools,
+                configured_scopes=settings.mcp_scopes,
+            )
             visible = [tool for tool in tools if tool.name in allowed]
             for tool in visible:
                 if tool.name.startswith("region_talk."):

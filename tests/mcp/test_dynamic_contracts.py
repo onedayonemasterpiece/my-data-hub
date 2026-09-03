@@ -23,7 +23,7 @@ from my_data_hub.mcp.contracts import (
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.runtime import UnifiedBootstrapWriteGate
-from my_data_hub.mcp.server import create_server
+from my_data_hub.mcp.server import MCPDependencies, create_server
 from my_data_hub.mcp.service import HubPermissionError, HubService
 
 NOW = 2_000_000_000
@@ -297,6 +297,44 @@ async def test_reader_catalog_never_lists_or_executes_write_tools() -> None:
     assert "provider.resources.delete" not in names
     assert denied.is_error
     assert denied.meta and "mcp/www_authenticate" in denied.meta
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_owner_can_discover_new_showcase_tools_before_incremental_grant() -> None:
+    """Avoid a catalog/OAuth deadlock while keeping execution scope-gated."""
+
+    showcase_tools = frozenset(name for name in TOOL_CONTRACTS if name.startswith("showcase."))
+    settings = SimpleNamespace(
+        mcp_remote_enabled=True,
+        mcp_scopes=frozenset(contract.scope for contract in TOOL_CONTRACTS.values()),
+        mcp_oauth_resource=RESOURCE,
+    )
+    legacy_owner_grant = replace(
+        identity("platform:read", "provider:read", "provider:write"),
+        client_id="https://chatgpt.com/oauth/my-data-hub/client.json",
+    )
+    server = create_server(
+        settings,  # type: ignore[arg-type]
+        dependencies=MCPDependencies(showcase_manager=object()),  # type: ignore[arg-type]
+        default_identity=legacy_owner_grant,
+    )
+
+    names = {tool.name for tool in await server.list_tools()}
+    denied = await server.call_tool("showcase.list", {})
+
+    assert showcase_tools <= names
+    assert denied.is_error
+    assert denied.meta and "mcp/www_authenticate" in denied.meta
+
+    reader = replace(
+        legacy_owner_grant,
+        subject="reader",
+        token_id="token:reader",
+        scopes=frozenset({"platform:read", "provider:read"}),
+    )
+    with identity_context(reader):
+        reader_names = {tool.name for tool in await server.list_tools()}
+    assert not (showcase_tools & reader_names)
 
 
 @pytest.mark.asyncio

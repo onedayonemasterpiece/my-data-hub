@@ -82,7 +82,14 @@ built from the same env-backed dependency graph; otherwise OAuth clients such
 as ChatGPT keep requesting their previously known scope set and hide the
 Showcase tools even though the backend is live. After adding scopes, verify the
 document before reconnecting the client account (a catalog refresh alone does
-not enlarge an existing OAuth grant).
+not enlarge an existing OAuth grant). To avoid a discovery deadlock for an
+already connected ChatGPT app, `tools/list` advertises enabled Showcase action
+schemas to the existing unified owner/operator grant identified by
+`provider:write`. This does not grant execution: each call remains denied until
+the exact Showcase scope is authorized, and reader grants remain unable to see
+the new actions. After deployment, refresh the app catalog, invoke a Showcase
+action to complete incremental authorization if prompted, then refresh once
+more and verify the six actions in the ChatGPT app UI.
 
 ## Build and start
 

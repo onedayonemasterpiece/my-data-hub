@@ -36,7 +36,12 @@ operator profile для широкого bounded-чтения и контрол�
 ## Реализованная поверхность bootstrap v0.1
 
 Tools регистрируются только при наличии требуемого scope. Запрещённый tool не только
-завершается ошибкой, но и не появляется в surface данного процесса.
+завершается ошибкой, но и не появляется в surface данного процесса. Узкое исключение
+для incremental OAuth discovery: существующий unified owner/operator grant с
+`provider:write` видит схемы включённых `showcase.*` actions, даже если grant был
+выдан до появления Showcase scopes. Вызов всё равно требует точный
+`showcase:read`/`showcase:write` и возвращает OAuth `insufficient_scope`; reader grants
+эти actions не видят.
 
 | Tool | Scope | Режим | Контракт |
 |---|---|---|---|
