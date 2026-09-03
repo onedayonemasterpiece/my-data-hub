@@ -1,0 +1,77 @@
+name: dataset-loop-mcp-native-canary
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/deployment.completed.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dataset-loop-mcp-deployment
+  cancel-in-progress: false
+
+jobs:
+  native-canary:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run the guarded native Dataset Loop canary
+        id: native
+        run: |
+          set -euo pipefail
+          python_bin="$HOME/.local/share/dataset-loop-mcp/current/venv/bin/python"
+          test -x "$python_bin"
+          "$python_bin" ops/dataset-loop-mcp/native_canary.py
+
+      - name: Persist terminal native evidence and remote readback
+        if: always()
+        run: |
+          set -euo pipefail
+          accepted=false
+          if [ "${{ steps.native.outcome }}" = success ]; then accepted=true; fi
+          mkdir -p "$RUNNER_TEMP/native-evidence"
+          if [ -s ops/dataset-loop-mcp/evidence/native-canary.json ]; then
+            cp ops/dataset-loop-mcp/evidence/native-canary.json "$RUNNER_TEMP/native-evidence/native-canary.json"
+          fi
+          if [ -s ops/dataset-loop-mcp/native-canary.completed.json ]; then
+            cp ops/dataset-loop-mcp/native-canary.completed.json "$RUNNER_TEMP/native-evidence/native-canary.completed.json"
+          fi
+          git fetch origin main
+          git reset --hard origin/main
+          mkdir -p ops/dataset-loop-mcp/evidence
+          if [ -s "$RUNNER_TEMP/native-evidence/native-canary.json" ]; then
+            cp "$RUNNER_TEMP/native-evidence/native-canary.json" ops/dataset-loop-mcp/evidence/native-canary.json
+          else
+            cat > ops/dataset-loop-mcp/evidence/native-canary.json <<EOF
+          {
+            "schema_version": 1,
+            "status": "NATIVE_BLOCKED_BEFORE_CONTROLLER_EVIDENCE",
+            "public_mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+            "native_dataset_loop_enabled": false,
+            "workflow_run_id": ${GITHUB_RUN_ID}
+          }
+          EOF
+          fi
+          if [ -s "$RUNNER_TEMP/native-evidence/native-canary.completed.json" ]; then
+            cp "$RUNNER_TEMP/native-evidence/native-canary.completed.json" ops/dataset-loop-mcp/native-canary.completed.json
+          else
+            cp ops/dataset-loop-mcp/evidence/native-canary.json ops/dataset-loop-mcp/native-canary.completed.json
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ops/dataset-loop-mcp/evidence/native-canary.json ops/dataset-loop-mcp/native-canary.completed.json
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence: record native Dataset Loop canary"
+            git push origin HEAD:main
+          fi
+          expected=$(git rev-parse HEAD)
+          actual=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$actual" = "$expected"
+          if [ "$accepted" != true ]; then exit 1; fi
