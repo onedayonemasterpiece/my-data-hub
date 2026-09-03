@@ -1,6 +1,9 @@
 
 # IdeaHub Showcase: production runtime
 
+The runtime image installs the HTTP client used by the gateway, and the read-only
+static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
+
 ## Ownership boundary
 
 `onedayonemasterpiece/idea-hub` is the curated source of cards,
