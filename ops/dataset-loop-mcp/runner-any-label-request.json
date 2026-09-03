@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "requested_at": "2026-09-03T00:00:00Z",
+  "purpose": "distinguish offline self-hosted runner from dedicated-label mismatch before Dataset Loop MCP deployment"
+}
