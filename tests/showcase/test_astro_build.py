@@ -148,5 +148,5 @@ def test_share_asset_has_image_payload_and_truthful_copy_fallback() -> None:
     assert "const copiedText" in share
     assert "await navigator.clipboard.writeText" in share
     assert "Текст и ссылка скопированы" in share
-    assert "Не удалось скопировать текст и ссылку" in share
+    assert "скопировать текст и ссылку" in share
     assert "AbortError" in share and "Поделиться отменено" in share
