@@ -1,6 +1,15 @@
 
 # IdeaHub Showcase: production runtime
 
+## Evidence status
+
+This document specifies the deployment boundary; it does not prove a deployment. On
+2026-09-04, live ChatGPT `showcase.list` returned `503 OAuth token request failed` and
+its discovered surface showed only six older methods. Source code, an image build, or
+compose configuration is not live acceptance. Do not claim the service ready until the
+receipts in [showcase-runtime-v2-verification.md](showcase-runtime-v2-verification.md)
+are complete for the deployed exact main successor.
+
 The runtime image installs the HTTP client used by the gateway, and the read-only
 static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
 The immutable renderer template is copied into the runtime's private `/work`
@@ -103,30 +112,32 @@ curl --fail --silent http://127.0.0.1:8791/healthz
 Do not expose port `8790` in Nginx, a tunnel, firewall rule or Docker
 published-port rule.
 
-## Live acceptance
+## Deploy, discovery, and readback acceptance
 
-Use unique idempotency keys containing the exact `idea-hub` source
-commit:
+Before accepting this runtime, deploy an exact committed main successor and record its
+commit/image identity. Verify the protected-resource document advertises both Showcase
+scopes, OAuth token issuance succeeds, and `tools/list` exposes all eight tools:
+`list`, `get_source`, `apply`, `rebuild`, `create_view`, `get_link`, `rotate_link`, and
+`revoke_link`. Then execute remote `get_source` and `apply`; schema registration alone
+is insufficient.
 
-```text
-showcase.create_view(view_id="main", idempotency_key="create:main:<source-sha>")
-showcase.get_link(view_id="main")
-showcase.rebuild(view_id="main", idempotency_key="rebuild:main:<source-sha>")
-showcase.get_link(view_id="main")              # URL unchanged
-showcase.rotate_link(view_id="main", idempotency_key="rotate:main:<source-sha>:1")
-showcase.get_link(view_id="main")              # new URL
-verify old URL is unavailable
-repeat rotate with the same key                 # duplicate, no third URL
-```
+Run the complete A–H content-only checklist in
+[showcase-runtime-v2-verification.md](showcase-runtime-v2-verification.md). In
+particular, use `apply(dry_run=true)` for no-mutation validation, retain exact
+source/public-page/link readbacks, and keep the existing URL for ordinary updates.
+Create a disposable view via create-aware `apply(..., expected_source_revision=absent)`
+and clean it up with `revoke_link`; do not rotate a partner link to demonstrate the
+constructor.
 
-Leave the new rotated main URL active. Verify catalog and detail
-pages plus `noindex`, `X-Robots-Tag` and `Referrer-Policy`. Save only
-a masked URL and hashes in the deployment receipt; retrieve the full
-URL through `showcase.get_link`.
+Publication is not atomic with the source commit. A source commit followed by publish
+failure must return `applied_not_published` (or an equally explicit status), retain the
+source revision, and be recoverable with idempotent `rebuild`.
 
 ## Rollback
 
-Stop only `showcase-runtime` and `showcase-static`, restart `remote-mcp` without the overlay
-and remove showcase scopes. Preserve the named state volume until
-every active URL has been explicitly revoked or migrated. This runtime
-requires neither PostgreSQL nor Kaggle.
+For content rollback, preserve the pre-change bundle and re-apply it against the then
+current revision with `publish=true`; the stable link remains unchanged. For runtime
+rollback, stop only `showcase-runtime` and `showcase-static`, restart `remote-mcp`
+without the overlay, and remove Showcase scopes. Preserve the named state volume until
+every active URL has been explicitly revoked or migrated. This runtime requires neither
+PostgreSQL nor Kaggle.

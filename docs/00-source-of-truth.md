@@ -37,3 +37,10 @@ ADR-0009 remains as historical evidence with superseded status.
 
 Any future topology change needs an owner-approved ADR with an explicit consequences
 diff. It cannot be introduced through deployment convenience or tests.
+
+## IdeaHub Showcase constructor decision
+
+The owner-approved constructor contract is maintained in
+[`ideahub-showcase.md`](ideahub-showcase.md). It records product and MCP decisions;
+live OAuth, discovery, deployment, and publication are accepted only through the
+evidence checklist linked there, not through repository source or deployment scaffold.

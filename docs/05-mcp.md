@@ -17,6 +17,17 @@ Public Streamable HTTP, OAuth and the stable hostname are later gates. PR-A keep
 MCP and all MCP writes disabled and makes no DNS/VPN/443 change. The database-free control
 status endpoint is not claimed as the final MCP gateway.
 
+## IdeaHub Showcase constructor boundary
+
+IdeaHub Showcase is a bounded content-publication MCP surface, not a general IdeaHub
+search API. The model obtains IdeaHub/voice context through an available external
+read-only source, then begins Showcase MCP work from an owner-approved manifest. Its
+MVP surface is the eight methods recorded in
+[`ideahub-showcase.md`](ideahub-showcase.md); `apply(dry_run=true)` is the validation
+preview. Repository registration does not establish live availability: OAuth,
+discovery, remote execution, and receipts remain unaccepted until the dedicated runtime
+evidence checklist passes.
+
 ## Preserved detailed contract — bound by ADR-0016
 
 The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.

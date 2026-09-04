@@ -1,113 +1,126 @@
 # IdeaHub Showcase in my-data-hub
 
-## Product contract
+## Status and authority
 
-IdeaHub Showcase is a deterministic mobile-first Astro projection of curated,
-publication-safe records from the private `idea-hub` repository. A normal rebuild keeps
-the existing high-entropy URL. Link rotation and revocation are explicit owner actions.
+This is the canonical product and MCP contract for IdeaHub Showcase. It records an
+owner-approved constructor target; it is **not** production-acceptance evidence.
+At this decision point, `origin/main` was
+`a6eb589e88a4219f6f19cfcf2154a31fe9523e35`. That source tree contains
+`get_source`, `apply`, sharing, `capability_type`, and CSP changes, but source code
+or a deployment scaffold is not proof that a remote service is live.
 
-The product deliberately has two layers:
+On 2026-09-04 a live ChatGPT call to `showcase.list` returned `503 OAuth token
+request failed`. The discovered ChatGPT surface showed only six older methods.
+OAuth, discovery, deployment, and remote readback are therefore **CURRENT NOT
+ACCEPTED** until the receipts in
+[`operations/showcase-runtime-v2-verification.md`](operations/showcase-runtime-v2-verification.md)
+exist.
 
-1. `idea-hub/showcase/` owns the curated items and view manifests.
-2. `my-data-hub` validates, renders, publishes and remembers active links.
+## Product goal and ordinary cycle
 
-## Routine after the one-time deployment
+IdeaHub Showcase is a constructor for mobile-first partner showcases. The ordinary
+content cycle contains no Codex:
 
 ```text
-edit or add showcase/items/*.yaml and showcase/views/*.yaml in idea-hub
-→ call showcase.rebuild(view_id)
-→ receive status, immutable source revision, build receipt and current URL
+model reads IdeaHub and relevant voice material through an available read-only source
+→ proposes card set and cuts
+→ owner approves
+→ model invokes Showcase MCP
+→ MCP mutates source, validates, builds, publishes, and returns receipts/link
+→ browser/mobile check
 ```
 
-No code agent is required for ordinary content changes, rebuilding an existing surface,
-retrieving a forgotten link, creating a surface from a new view manifest, rotating a URL,
-or revoking a URL.
+Codex is required only to change or repair the constructor itself. This release does
+not add a general IdeaHub search API: IdeaHub reading is an external read-only input
+(GitHub/IdeaHub connector), and the Showcase API begins with the approved manifest.
+Acceptance must demonstrate that source and publication proceed without Codex after
+approval.
 
-A code agent is required only when the schema, visual components, MCP contract or hosting
-infrastructure changes.
+`idea-hub/showcase/` remains the curated source of manifests and cards.
+`my-data-hub` owns bounded source mutation, validation, rendering, publication,
+private active-link state, and receipts.
 
-## MCP contract
+## MVP MCP surface
 
-The standalone contract server in `my_data_hub.showcase.mcp_server` exposes:
+The MVP has exactly these eight methods:
 
-- `showcase.list` — list registered surfaces;
-- `showcase.get_link(view_id)` — return the current full link and last receipt;
-- `showcase.get_source(view_id)` — return the validated current view/items and exact source revision;
-- `showcase.apply(...)` — bounded optimistic source upsert with dry-run and optional publish;
-- `showcase.rebuild(view_id)` — validate, build, publish and return the same link;
-- `showcase.create_view(view_id, publish=true)` — register a source view with its own link;
-- `showcase.rotate_link(view_id)` — build under a new slug and revoke the old prefix;
-- `showcase.revoke_link(view_id)` — remove or disable the current prefix.
+- `showcase.list`
+- `showcase.get_source`
+- `showcase.apply`
+- `showcase.rebuild`
+- `showcase.create_view`
+- `showcase.get_link`
+- `showcase.rotate_link`
+- `showcase.revoke_link`
 
-The standard `my-data-hub` MCP server exposes the same eight tools when
-`MY_DATA_HUB_SHOWCASE_ENABLED=true` and the authenticated owner/operator token carries
-`showcase:read` and `showcase:write`. They therefore use the existing OAuth boundary,
-security metadata and audit path. `my-data-hub-showcase-mcp` remains only a local stdio
-entry point for focused contract testing.
+Do not add a `showcase.validate` method: `showcase.apply(dry_run=true)` is the
+validation preview. `create_view` remains for backward compatibility and an operator
+flow where source already exists; it is not the primary constructor flow.
 
-## Runtime inputs
+### Required create-aware `apply` change
 
-| Variable | Purpose |
-|---|---|
-| `MY_DATA_HUB_SHOWCASE_ENABLED` | Enables the six tools in the standard my-data-hub MCP catalog. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN` | Read-only token for private `idea-hub` source files. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN` | Optional repository-scoped write token used only by `showcase.apply`; absence fails closed. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE` | Preferred production credential: private half of a repository-scoped, read-only GitHub deploy key. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE` | Pinned GitHub SSH host keys used with the deploy key. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY` | Defaults to `onedayonemasterpiece/idea-hub`. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_REF` | Defaults to `main`; every build resolves it to one exact commit. |
-| `MY_DATA_HUB_SHOWCASE_GITHUB_ROOT` | Defaults to `showcase`. |
-| `MY_DATA_HUB_SHOWCASE_ORIGIN` | Public origin, for example `https://ideas.kenigevents.ru`. |
-| `MY_DATA_HUB_SHOWCASE_STATE_PATH` | Persistent private JSON state containing slugs and receipts. |
-| `MY_DATA_HUB_SHOWCASE_SITE_ROOT` | Path to the bundled `showcase-site`. |
-| `MY_DATA_HUB_SHOWCASE_PUBLISH_COMMAND_JSON` | JSON argv template for checked artifact publication. |
-| `MY_DATA_HUB_SHOWCASE_REVOKE_COMMAND_JSON` | JSON argv template for removing or disabling a prefix. |
+The only missing constructor contract change is create-aware `showcase.apply`:
 
-For development, set `MY_DATA_HUB_SHOWCASE_SOURCE_ROOT`. The production DevCoveer
-deployment also uses `MY_DATA_HUB_SHOWCASE_LOCAL_PUBLISH_ROOT`, but only inside the
-isolated runtime and only against the private bind directory served read-only by the
-dedicated loopback `showcase-static` service. No publisher credential is needed or
-exposed to the public MCP edge.
+- `expected_source_revision` accepts either an exact current revision for update or
+  the reserved value `absent` for CAS-create.
+- With `absent`, the operation succeeds only when the view truly does not exist;
+  collision fails closed. It requires a non-empty complete `view` and all items
+  referenced by `view.item_ids`.
+- `dry_run=true` validates the complete proposed bundle and reports changed paths and
+  buildability; it writes no source and creates no link.
+- `dry_run=false, publish=false` writes the source draft only.
+- `dry_run=false, publish=true` writes source and, when no registry/link exists,
+  internally creates a stable secret slug, builds, publishes, and returns URL and
+  receipts.
+- An exact-revision update keeps its existing slug. Only `rotate_link` changes URL.
 
-Publisher command templates are arrays, not shell strings. Supported placeholders are
-`{source}`, `{prefix}`, `{slug}` and `{view_id}`. Example shape:
+A source commit and publication are not one atomic transaction. If source commit
+succeeds but publication fails, the return must explicitly report
+`applied_not_published` (or an equivalent unambiguous state), preserve the committed
+revision, and allow an idempotent `rebuild`; it must not report publication success.
 
-```json
-["aws", "s3", "sync", "{source}", "s3://example-bucket/{prefix}", "--delete"]
+### Flows
+
+Existing view:
+
+```text
+get_source
+→ owner-approved patch
+→ apply(dry_run=true)
+→ apply(dry_run=false, publish=true)
+→ get_source + get_link readback
 ```
 
-The deployment command must additionally apply the headers described by
-`showcase-headers.json` to HTML objects. The final infrastructure smoke verifies
-`X-Robots-Tag`, `Referrer-Policy`, root isolation, old-link revocation and URL readback.
+The link remains stable.
 
-## Local development
+New view:
 
-```bash
-cd showcase-site
-npm install
-cd ..
-
-export MY_DATA_HUB_SHOWCASE_SOURCE_ROOT="$PWD/tests/showcase/fixtures"
-export MY_DATA_HUB_SHOWCASE_SITE_ROOT="$PWD/showcase-site"
-export MY_DATA_HUB_SHOWCASE_STATE_PATH="$PWD/.tmp/showcase-state.json"
-export MY_DATA_HUB_SHOWCASE_LOCAL_PUBLISH_ROOT="$PWD/.tmp/public"
-export MY_DATA_HUB_SHOWCASE_ORIGIN="https://ideas.example.test"
-
-python -m my_data_hub.showcase.cli rebuild main
-python -m my_data_hub.showcase.cli get-link main
-python -m my_data_hub.showcase.cli create-view lecturers-guides
-python -m my_data_hub.showcase.cli rotate-link lecturers-guides
+```text
+owner-approved complete manifest
+→ apply(expected_source_revision=absent, dry_run=true)
+→ apply(expected_source_revision=absent, dry_run=false, publish=true)
+→ get_source + get_link
 ```
 
-## Safety properties
+This returns a new stable secret link.
 
-- only records marked `publish_state: ready` are accepted;
-- a record cannot exceed the view's visibility ceiling;
-- source files are read from one exact Git commit per build;
-- the renderer receives only sanitized JSON and cannot read private documents;
-- generated HTML is checked for `noindex`, `noarchive`, `no-referrer` and forbidden
-  internal markers;
-- a normal rebuild reuses the stored slug;
-- rotation publishes the new prefix before revoking the old one;
-- state writes are atomic and stored with owner-only filesystem permissions;
-- production publication is a deployment-provided argv command, executed without a shell.
+## Manifest and presentation rules
+
+- Canonical card ordering is only `view.item_ids`.
+- `capability_type` is `technical`, `product`, or `business`. It is required for new
+  or modified partner views; legacy `null` remains readable only until migration.
+- Category, audience, maturity, and effort remain independent dimensions.
+- Production contact CTA is Telegram `@confidentmax`,
+  `https://t.me/confidentmax`.
+- Sharing appears beneath each card, on its detail page, and at the bottom of the
+  index. Web Share uses a short text, URL, and business-card asset where supported;
+  fallback copies link/text. General and card-specific OG/share assets are static.
+
+## Runtime inputs and safety
+
+Existing runtime variables and deployment isolation remain documented in
+[`operations/ideahub-showcase-runtime.md`](operations/ideahub-showcase-runtime.md).
+The renderer must read one exact source revision, accept only ready records within the
+view visibility ceiling, receive only sanitized publication JSON, and publish through
+a shell-free deployment-provided argv contract. Normal rebuild reuses the stored slug;
+rotation publishes the new prefix before revoking the old one.
