@@ -21,7 +21,7 @@ def test_verifier_reader_catalog_is_the_exact_runtime_read_tools() -> None:
     assert len(READ_ONLY_TOOLS) == 25
     assert {
         name for name, contract in TOOL_CONTRACTS.items() if contract.role == "reader"
-    } == READ_ONLY_TOOLS | {"showcase.list"}
+    } == READ_ONLY_TOOLS | {"showcase.list", "showcase.get_source"}
 
 
 def test_remote_status_prefers_structured_result() -> None:
