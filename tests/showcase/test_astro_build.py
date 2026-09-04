@@ -140,3 +140,13 @@ def test_production_telegram_cta_contract_is_preserved() -> None:
     contract = (REPOSITORY / "docs" / "ideahub-showcase.md").read_text(encoding="utf-8")
     assert "@confidentmax" in contract
     assert "https://t.me/confidentmax" in contract
+
+
+def test_share_asset_has_image_payload_and_truthful_copy_fallback() -> None:
+    share = (SITE / "src/scripts/showcase-share.js").read_text(encoding="utf-8")
+    assert "files: [file]" in share
+    assert "const copiedText" in share
+    assert "await navigator.clipboard.writeText" in share
+    assert "Текст и ссылка скопированы" in share
+    assert "Не удалось скопировать текст и ссылку" in share
+    assert "AbortError" in share and "Поделиться отменено" in share
