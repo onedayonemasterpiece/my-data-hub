@@ -1,67 +1,68 @@
 # IdeaHub Showcase runtime verification
 
-## CURRENT NOT ACCEPTED
+## ACCEPTED — 2026-09-04
 
-Repository checks and historical workflow output are not live evidence. As of
-2026-09-04, the production Showcase runtime still has no completed A–H receipt.
+The A–H live acceptance completed on DevCoveer through the production OAuth MCP
+endpoint. The sanitized durable receipt is
+[`evidence/2026-09-04-ideahub-showcase-live-closure.json`](evidence/2026-09-04-ideahub-showcase-live-closure.json).
+The full secret URL is deliberately absent from Git, receipts, logs, and issue text.
 
-The original live ChatGPT call returned `503 OAuth token request failed` and exposed
-only six older methods. A bounded GitHub-hosted closure then tested every existing
-repository credential name without logging or persisting any secret:
+Accepted runtime identity:
 
-| Run | Trigger | Result |
+- live run: `devcoveer-20260904T175724Z`;
+- deployed `my-data-hub` commit: `bb9b2cdd317d1fc7162505abaf02c3b8de8fa278`;
+- control image: `sha256:af7cac55eb0b82fe6590a388c201080e3c7395506026e690bcb4089dd20b020f`;
+- Showcase image: `sha256:d7ce1e8b0c863e4854dee24db15292369e0a292210ec225409a0a2ae146b0066`;
+- final IdeaHub source/readback revision after cleanup:
+  `9ec74fbb0d2b601722074746dfb1a34883fe74b0`;
+- final tree hash: `dc546771f5532e893ef751cd4a12933340bc8f0450ef60da6d35ff68b37eae26`;
+- build: 71 files, including 33 HTML files.
+
+## A–H result
+
+| Gate | Result | Live evidence |
 |---|---|---|
-| `33889785417` | same-repository pull request | `MCP_TOKEN_MISSING` |
-| `33890805899` | same-repository pull request, canary fallback | `MCP_TOKEN_MISSING` |
-| `33890998236` | same-repository pull request, full known MCP-token fallback chain | `MCP_TOKEN_MISSING` |
-| `33891684997` | trusted direct push, full known MCP/data-token fallback chain | `MCP_TOKEN_MISSING` |
+| A | PASS | OAuth refresh succeeded; all eight Showcase methods were invoked against production. |
+| B | PASS | `main` dry-run made no mutation; temporary content was applied, published, and read back at the same URL. |
+| C | PASS | Disposable two-card view returned 200, rotated, rejected the old URL with 404, repeated its idempotency key without a third URL, and was revoked with 404. |
+| D | PASS | Playwright at 390×844 found one column, no horizontal overflow, and changing category/capability/maturity/search counts. |
+| E | PASS | 33 index share controls, detail sharing, Web Share payload, and `@confidentmax` CTA passed. |
+| F | PASS | No console/network errors or executable inline scripts; CSP `script-src` has no `unsafe-inline`; the complete private robots policy and `no-referrer` passed. |
+| G | PASS | Source revision, masked URL, slug SHA-256, tree hash, file/HTML counts, commit, and image identities are retained in the sanitized receipt. |
+| H | PASS | The exact pre-change bundle hash was restored and the original `main` URL remained unchanged. |
 
-All four attempts failed before opening an MCP session. They made no source, link,
-publisher, or public-page mutation; no disposable view was created. Run
-`33891684997` uploaded a sanitized failure receipt with
-`main_rollback_completed=false`, `disposable_revoked=true`, and
-`source_cleanup_required=null`.
+The disposable source was removed in IdeaHub commit
+`9ec74fbb0d2b601722074746dfb1a34883fe74b0`. Its created and rotated URLs were
+already revoked before deletion. A post-cleanup `showcase.create_view(main)`
+idempotency readback plus explicit `showcase.rebuild(main)` republished the final
+IdeaHub revision while retaining the existing secret URL.
 
-This is consistent with the repository's production credential contract:
-`scripts/provider/devstand_acceptance_controller.py` forbids static MCP bearers and
-requires the private host-side `MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE` available on
-DevCoveer. A GitHub-hosted runner cannot substitute for that credential boundary.
-Owner-hosted/self-hosted GitHub Actions runners remain prohibited. Therefore the
-remaining closure must run directly on DevCoveer through its authorized execution
-surface, not through GitHub Actions.
+## Release and adjacent-surface regression evidence
 
-Do not mark this runtime accepted until all receipts below are collected from the
-deployed exact main successor.
+- `python -m compileall src tests`: PASS;
+- repository/schema/layout/security validation: PASS, 4,769 checks;
+- generated notebook drift check: PASS, no drift;
+- full Ruff check: PASS;
+- full Pytest suite: PASS (five expected skips);
+- all five deployed health/metadata endpoints: HTTP 200/204 as specified;
+- live `platform.status`: PASS;
+- live catalog: 26 tools, retaining the provider resource/upload surfaces and
+  `youtube.video.analyze` alongside the eight Showcase tools;
+- the pre-existing `voice-v2-hotfix.conf` systemd drop-in remained active during
+  the exact-commit deployment.
 
-## Required end-to-end evidence
+## Regression contract
 
-A. OAuth succeeds; `tools/list` exposes all eight Showcase methods; `get_source` and
-`apply` execute remotely.
+Future releases must repeat the A–H checks when changing the Showcase gateway,
+renderer, OAuth scopes, source writer, link state, static edge, or publication
+timeouts. A source commit plus a failed publish is `applied_not_published`, never
+publication success; read source/link state before a retry. Keep the public URL out
+of durable evidence and use only a host-side rotating OAuth credential.
 
-B. Update existing `main` through MCP only: change one disposable test string,
-ordering, or CTA; prove dry-run has no mutation; publish; read exact source; verify
-public page changed and URL did not.
+## Historical blocker (closed)
 
-C. Create a disposable partner view of two or three cards through create-aware
-`apply(expected_source_revision=absent)`; obtain its new URL; rotate with a repeated
-idempotency key, prove no third URL, revoke, and clean up its source YAML.
-
-D. At 390x844, prove one column and no horizontal overflow; category, capability,
-readiness, and search filters change the count.
-
-E. Verify sharing beneath a card, on detail, and at index bottom; verify Web Share
-payload or fallback; production CTA resolves to `@confidentmax`.
-
-F. Verify CSP has no executable inline script and no script `unsafe-inline`; capture
-no console or network errors.
-
-G. Preserve a receipt containing exact source revision, artifact/tree hash, file and
-HTML counts, and stable slug; readback must match the submitted payload.
-
-H. Roll back without another method: retain the pre-change bundle, re-apply it at the
-current revision, publish it, and prove the link is unchanged.
-
-For every evidence item retain timestamp, deployed commit/image identity, masked URL
-where appropriate, request/result receipts, and failure evidence. A source commit plus
-a failed publish must be labelled `applied_not_published` (or equivalent), never as a
-successful publication; retry safely with `rebuild`.
+The earlier GitHub-hosted runs `33889785417`, `33890805899`, `33890998236`, and
+`33891684997` ended with `MCP_TOKEN_MISSING`. This correctly demonstrated that a
+GitHub-hosted runner cannot replace DevCoveer's host-side OAuth credential. No
+self-hosted GitHub Actions runner was added; final acceptance ran directly on
+DevCoveer as required.

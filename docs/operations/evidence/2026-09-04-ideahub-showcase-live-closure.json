@@ -1,0 +1,133 @@
+{
+  "checks": {
+    "disposable_lifecycle": {
+      "created_slug_sha256": "adffe558a6884457b56bd6a900beaebc42f9be4bd9846a0c556349cbc3f7f8ca",
+      "created_url_masked": "https://ideas.kenigevents.ru/v/X76S…DW92/",
+      "duplicate_rotation_created_no_third_url": true,
+      "old_status_after_rotation": 404,
+      "revoked_status": 404,
+      "rotated_slug_sha256": "e5c4efc0d815079a816bc8687d48f3fae85a42a208473139ae8cf0663a0ea097",
+      "rotated_url_masked": "https://ideas.kenigevents.ru/v/RNWF…fGHo/",
+      "source_cleanup_paths": [
+        "showcase/views/acceptance-devcoveer-20260904t175724z.yaml",
+        "showcase/items/acceptance-devcoveer-20260904t175724z-item-1.yaml",
+        "showcase/items/acceptance-devcoveer-20260904t175724z-item-2.yaml"
+      ],
+      "source_revision": "3b26390975dae3a5de4465274fc378ecfff4004b",
+      "status": "PASS",
+      "view_id": "acceptance-devcoveer-20260904t175724z"
+    },
+    "main_content_cycle": {
+      "build": {
+        "file_count": 71,
+        "html_count": 33,
+        "slug_sha256": "9af7fd2f00989271e53d47a84fcb43a1b75a7ebcd20322e21554c588c1015641",
+        "source_revision": "09968cfd7ba0b2b04b7db699d1afbe16a191d890",
+        "tree_sha256": "dc546771f5532e893ef751cd4a12933340bc8f0450ef60da6d35ff68b37eae26",
+        "url_masked": "https://ideas.kenigevents.ru/v/bnNk…gCud/"
+      },
+      "dry_run_no_mutation": true,
+      "initial_bundle_sha256": "e73cc8f8856bde62cce9ea49a2eca0db1b83fa7ea2db035e6ba7b49b73b3e088",
+      "restored_bundle_sha256": "e73cc8f8856bde62cce9ea49a2eca0db1b83fa7ea2db035e6ba7b49b73b3e088",
+      "restored_source_revision": "09968cfd7ba0b2b04b7db699d1afbe16a191d890",
+      "rollback_exact_bundle": true,
+      "security": {
+        "csp_sha256": "82a79f2254cbd444c1fc1dc31919af8bc9f0f5027aedfef41360c10a730cd3ea",
+        "referrer_policy": "no-referrer",
+        "x_robots_tag": [
+          "noarchive",
+          "nofollow",
+          "noimageindex",
+          "noindex",
+          "nosnippet"
+        ]
+      },
+      "source_change_and_readback": true,
+      "stable_url": true,
+      "status": "PASS"
+    },
+    "mcp_methods_invoked": {
+      "methods": [
+        "showcase.list",
+        "showcase.get_source",
+        "showcase.apply",
+        "showcase.rebuild",
+        "showcase.create_view",
+        "showcase.get_link",
+        "showcase.rotate_link",
+        "showcase.revoke_link"
+      ],
+      "status": "PASS"
+    },
+    "mobile_browser": {
+      "card_count": 32,
+      "console_errors": 0,
+      "cta": "@confidentmax",
+      "detail_page": "PASS",
+      "filter_counts": {
+        "capability_type": 1,
+        "category": 4,
+        "maturity": 3,
+        "search": 1
+      },
+      "horizontal_overflow": false,
+      "index_share_controls": 33,
+      "inline_executable_scripts": 0,
+      "network_errors": 0,
+      "one_column": true,
+      "status": "PASS",
+      "viewport": "390x844",
+      "web_share_payload": "PASS"
+    },
+    "post_cleanup_readback": {
+      "build": {
+        "file_count": 71,
+        "html_count": 33,
+        "slug_sha256": "9af7fd2f00989271e53d47a84fcb43a1b75a7ebcd20322e21554c588c1015641",
+        "source_revision": "9ec74fbb0d2b601722074746dfb1a34883fe74b0",
+        "tree_sha256": "dc546771f5532e893ef751cd4a12933340bc8f0450ef60da6d35ff68b37eae26",
+        "url_masked": "https://ideas.kenigevents.ru/v/bnNk…gCud/"
+      },
+      "create_view_created": false,
+      "create_view_idempotent": false,
+      "create_view_invoked": true,
+      "rebuild_invoked": true,
+      "source_revision": "9ec74fbb0d2b601722074746dfb1a34883fe74b0",
+      "stable_url": true,
+      "status": "PASS"
+    },
+    "tool_discovery": {
+      "showcase_tools": [
+        "showcase.apply",
+        "showcase.create_view",
+        "showcase.get_link",
+        "showcase.get_source",
+        "showcase.list",
+        "showcase.rebuild",
+        "showcase.revoke_link",
+        "showcase.rotate_link"
+      ],
+      "status": "PASS",
+      "total_tools": 26
+    }
+  },
+  "cleanup": {
+    "deleted_paths": [
+      "showcase/views/acceptance-devcoveer-20260904t175724z.yaml",
+      "showcase/items/acceptance-devcoveer-20260904t175724z-item-1.yaml",
+      "showcase/items/acceptance-devcoveer-20260904t175724z-item-2.yaml"
+    ],
+    "disposable_revoked": true,
+    "main_rollback_completed": true,
+    "source_cleanup_commit": "9ec74fbb0d2b601722074746dfb1a34883fe74b0",
+    "source_cleanup_completed": true,
+    "source_cleanup_required": null
+  },
+  "control_image_id": "sha256:af7cac55eb0b82fe6590a388c201080e3c7395506026e690bcb4089dd20b020f",
+  "deployed_commit": "bb9b2cdd317d1fc7162505abaf02c3b8de8fa278",
+  "endpoint": "https://mcp-datahub.kenigevents.ru/mcp",
+  "run_id": "devcoveer-20260904T175724Z",
+  "schema_version": 1,
+  "showcase_image_id": "sha256:d7ce1e8b0c863e4854dee24db15292369e0a292210ec225409a0a2ae146b0066",
+  "status": "PASS"
+}

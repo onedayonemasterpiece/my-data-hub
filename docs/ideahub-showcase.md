@@ -2,19 +2,11 @@
 
 ## Status and authority
 
-This is the canonical product and MCP contract for IdeaHub Showcase. It records an
-owner-approved constructor target; it is **not** production-acceptance evidence.
-At this decision point, `origin/main` was
-`a6eb589e88a4219f6f19cfcf2154a31fe9523e35`. That source tree contains
-`get_source`, `apply`, sharing, `capability_type`, and CSP changes, but source code
-or a deployment scaffold is not proof that a remote service is live.
-
-On 2026-09-04 a live ChatGPT call to `showcase.list` returned `503 OAuth token
-request failed`. The discovered ChatGPT surface showed only six older methods.
-OAuth, discovery, deployment, and remote readback are therefore **CURRENT NOT
-ACCEPTED** until the receipts in
-[`operations/showcase-runtime-v2-verification.md`](operations/showcase-runtime-v2-verification.md)
-exist.
+This is the canonical product and MCP contract for IdeaHub Showcase. Production
+A–H acceptance completed on DevCoveer on 2026-09-04. The exact runtime identity,
+sanitized live receipt, cleanup evidence, and regression contract are recorded in
+[`operations/showcase-runtime-v2-verification.md`](operations/showcase-runtime-v2-verification.md).
+The full secret URL remains outside Git and durable receipts.
 
 ## Product goal and ordinary cycle
 
