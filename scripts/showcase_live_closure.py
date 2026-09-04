@@ -74,12 +74,16 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-def select_disposable_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Select two source-backed items without assuming optional taxonomy fields."""
+def select_disposable_items(items: list[dict[str, Any]], view_id: str) -> list[dict[str, Any]]:
+    """Create two isolated test items without changing shared source item files."""
 
     eligible = [item for item in items if isinstance(item.get("id"), str) and item["id"]]
     require(len(eligible) >= 2, "DISPOSABLE_VIEW_ITEMS_UNAVAILABLE")
-    return deepcopy(eligible[:2])
+    selected = deepcopy(eligible[:2])
+    for position, item in enumerate(selected, start=1):
+        item["id"] = f"{view_id}-item-{position}"
+        item["capability_type"] = item.get("capability_type") or "technical"
+    return selected
 
 
 def mask_url(url: str) -> str:
@@ -510,7 +514,7 @@ async def run() -> int:
                     "build": build_evidence(link_restored, main_url),
                 }
 
-                disposable_items = select_disposable_items(original_source["items"])
+                disposable_items = select_disposable_items(original_source["items"], disposable_view_id)
                 disposable_view = {
                     "schema_version": 1,
                     "id": disposable_view_id,
@@ -627,7 +631,13 @@ async def run() -> int:
                     "old_status_after_rotation": old_status,
                     "revoked_status": revoked_status,
                     "duplicate_rotation_created_no_third_url": True,
-                    "source_cleanup_path": f"showcase/views/{disposable_view_id}.yaml",
+                    "source_cleanup_paths": [
+                        f"showcase/views/{disposable_view_id}.yaml",
+                        *[
+                            f"showcase/items/{item['id']}.yaml"
+                            for item in disposable_items
+                        ],
+                    ],
                 }
 
         require(main_url is not None, "MAIN_URL_UNAVAILABLE_FOR_BROWSER")
@@ -653,7 +663,11 @@ async def run() -> int:
             .get("rollback_exact_bundle")
             is True,
             "disposable_revoked": not disposable_active,
-            "source_cleanup_required": f"showcase/views/{disposable_view_id}.yaml"
+            "source_cleanup_required": [
+                f"showcase/views/{disposable_view_id}.yaml",
+                f"showcase/items/{disposable_view_id}-item-1.yaml",
+                f"showcase/items/{disposable_view_id}-item-2.yaml",
+            ]
             if "disposable_lifecycle" in receipt.get("checks", {})
             else None,
         }

@@ -18,7 +18,12 @@ def test_disposable_selection_does_not_require_optional_taxonomy() -> None:
         {"id": "third", "capability_type": "technical"},
     ]
 
-    selected = select_disposable_items(items)
+    selected = select_disposable_items(items, "acceptance-run")
 
-    assert [item["id"] for item in selected] == ["first", "second"]
+    assert [item["id"] for item in selected] == [
+        "acceptance-run-item-1",
+        "acceptance-run-item-2",
+    ]
+    assert [item["capability_type"] for item in selected] == ["technical", "technical"]
     assert selected is not items
+    assert [item["id"] for item in items] == ["first", "second", "third"]
