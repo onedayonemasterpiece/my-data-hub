@@ -190,3 +190,6 @@ For content rollback, preserve the pre-change bundle, review concurrent changes 
 only the intended correction against the current revision with `mode=publish`; shared-card
 protection remains active. Source already committed during a partial publish must be
 accounted for explicitly. This runtime requires neither PostgreSQL nor Kaggle.
+
+The Compose gateway timeout fallback is 240 seconds, matching the Python gateway default.
+Explicit deployed environment values still take precedence and must be checked at rollout.

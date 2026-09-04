@@ -422,6 +422,7 @@ class ShowcaseOperationController:
                 legacy_registration = (
                     tool == "showcase.create_view"
                     and arguments.get("view") is None
+                    and not arguments.get("items")
                     and arguments.get("mode") is None
                     and arguments.get("dry_run") is None
                 )

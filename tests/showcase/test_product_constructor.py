@@ -387,3 +387,14 @@ def test_runtime_checks_actual_body_size_not_just_header(setup):
     )
     assert response.status_code == 413
     assert writer.writes == 0
+
+
+def test_runtime_incomplete_constructor_does_not_register_or_publish(setup):
+    manager, writer, control, journal, _view = setup
+    card = manager.source.get_source("main").items[0].model_dump()
+    card["capability_type"] = "technical"
+    with pytest.raises(ShowcaseRequestError, match="VIEW_REQUIRED"):
+        invoke(control, "create_view", view_id="main", items=[card], idempotency_key="incomplete-create")
+    assert writer.writes == 0
+    assert not manager.state.path.exists()
+    assert not journal.path.exists()

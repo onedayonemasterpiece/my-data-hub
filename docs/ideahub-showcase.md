@@ -202,3 +202,9 @@ shared cards. A transport failure requires explicit recovery, not a fabricated P
 
 Deployment topology and operational safeguards:
 [`operations/ideahub-showcase-runtime.md`](operations/ideahub-showcase-runtime.md).
+
+### Incomplete constructor safety
+
+`create_view` with nonempty `items` but no `view` fails with `VIEW_REQUIRED`
+without source writes, link registration, publication, or idempotency journal changes.
+Legacy registration applies only when no view, items, mode, or dry-run is supplied.
