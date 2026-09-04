@@ -68,22 +68,24 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
         const vm = require('node:vm');
         const listeners = new Map();
         const search = {{ value: '', addEventListener: (name, fn) => listeners.set(`search:${{name}}`, fn) }};
-        const filters = ['audience', 'category', 'maturity', 'effort'].map((name) => ({{
+        const filters = ['audience', 'category', 'capabilityType', 'maturity', 'effort'].map((name) => ({{
           value: '',
           dataset: {{ showcaseFilter: name }},
           addEventListener: (event, fn) => listeners.set(`${{name}}:${{event}}`, fn),
         }}));
         const cards = [
           {{ dataset: {{
-            audience: 'guides', category: 'voice', maturity: 'prototype', effort: 'medium',
+            audience: 'guides', category: 'voice', capabilityType: 'technical', maturity: 'prototype', effort: 'medium',
             search: 'клонирование голоса аудиогиды',
           }}, hidden: false }},
           {{ dataset: {{
-            audience: 'business', category: 'business', maturity: 'designed', effort: 'high',
+            audience: 'business', category: 'business', capabilityType: 'business',
+            maturity: 'designed', effort: 'high',
             search: 'персональный помощник аналитика',
           }}, hidden: false }},
           {{ dataset: {{
-            audience: 'media', category: 'content', maturity: 'idea', effort: 'medium', search: 'короткие видео',
+            audience: 'media', category: 'content', capabilityType: 'product',
+            maturity: 'idea', effort: 'medium', search: 'короткие видео',
           }}, hidden: false }},
         ];
         const count = {{ textContent: '3 возможностей' }};
@@ -98,11 +100,13 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
         const snapshot = () => ({{ count: count.textContent, visible: cards.filter((card) => !card.hidden).length }});
         filters[1].value = 'voice'; listeners.get('category:change')();
         const category = snapshot();
-        filters[1].value = ''; filters[2].value = 'designed'; listeners.get('maturity:change')();
+        filters[1].value = ''; filters[3].value = 'designed'; listeners.get('maturity:change')();
         const readiness = snapshot();
+        filters[3].value = ''; filters[2].value = 'product'; listeners.get('capabilityType:change')();
+        const capability = snapshot();
         filters[2].value = ''; search.value = 'видео'; listeners.get('search:input')();
         const searchResult = snapshot();
-        process.stdout.write(JSON.stringify({{ category, readiness, searchResult }}));
+        process.stdout.write(JSON.stringify({{ category, readiness, capability, searchResult }}));
         """
     )
     completed = subprocess.run(
@@ -114,6 +118,7 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
     assert json.loads(completed.stdout) == {
         "category": {"count": "1 возможность", "visible": 1},
         "readiness": {"count": "1 возможность", "visible": 1},
+        "capability": {"count": "1 возможность", "visible": 1},
         "searchResult": {"count": "1 возможность", "visible": 1},
     }
 
@@ -123,6 +128,9 @@ def test_share_controls_and_static_svg_routes_exist() -> None:
     detail = (SITE / "src/pages/ideas/[id].astro").read_text(encoding="utf-8")
     share = (SITE / "src/scripts/showcase-share.js").read_text(encoding="utf-8")
     assert "ShareButton" in index and "ShareButton" in detail
+    assert 'data-showcase-filter="capabilityType"' in index
+    for label in ("\u0412\u0441\u0435 \u0442\u0438\u043f\u044b \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0435\u0439", "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0430\u044f", "\u041f\u0440\u043e\u0434\u0443\u043a\u0442\u043e\u0432\u0430\u044f", "\u0411\u0438\u0437\u043d\u0435\u0441"):
+        assert label in index
     assert "navigator.share" in share and "navigator.canShare" in share and "clipboard" in share
     assert (SITE / "src/pages/share/idea-hub.svg.ts").is_file()
     assert (SITE / "src/pages/share/[id].svg.ts").is_file()

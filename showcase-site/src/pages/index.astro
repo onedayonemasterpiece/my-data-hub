@@ -40,10 +40,15 @@ const options = (key) => [...new Map(items.map((item) => [item[key].id, item[key
           {options('category').map(([value, label]) => <option value={value}>{label}</option>)}
         </select>
       </label>
-      {items.some((item) => item.capability_type) && <label>
-        <span class="sr-only">Тип решения</span>
-        <select data-showcase-filter="capabilityType"><option value="">Тип решения</option><option value="technical">Техническое</option><option value="product">Продуктовое</option><option value="business">Бизнесовое</option></select>
-      </label>}
+      <label>
+        <span class="sr-only">Тип возможности</span>
+        <select data-showcase-filter="capabilityType" aria-label="Тип возможности">
+          <option value="">Все типы возможностей</option>
+          <option value="technical">Техническая</option>
+          <option value="product">Продуктовая</option>
+          <option value="business">Бизнес</option>
+        </select>
+      </label>
       <label>
         <span class="sr-only">Готовность</span>
         <select data-showcase-filter="maturity">
