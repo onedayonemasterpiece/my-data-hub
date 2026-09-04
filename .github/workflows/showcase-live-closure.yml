@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 25
     env:
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
-      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_READER_TOKEN || secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
       SHOWCASE_LIVE_RECEIPT: artifacts/showcase-live-closure.json
     steps:
       - uses: actions/checkout@v4
