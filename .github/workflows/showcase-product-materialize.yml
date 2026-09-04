@@ -44,17 +44,18 @@ jobs:
           p.write_text(s)
           p = Path('src/my_data_hub/showcase/runtime.py')
           s = p.read_text().replace('r"[a-z0-9][a-z0-9-]{1,79}"', 'r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]"')
-          s = s.replace('            invocation = ShowcaseInvocation.model_validate(await request.json())', '''            body = bytearray()
-                      async for chunk in request.stream():
-                          body.extend(chunk)
-                          if len(body) > max_request_bytes:
-                              raise ShowcaseRequestError("REQUEST_TOO_LARGE")
-                      invocation = ShowcaseInvocation.model_validate_json(bytes(body))'''.replace('\n          ', '\n'))
+          lines = [
+              '            body = bytearray()',
+              '            async for chunk in request.stream():',
+              '                body.extend(chunk)',
+              '                if len(body) > max_request_bytes:',
+              '                    raise ShowcaseRequestError("REQUEST_TOO_LARGE")',
+              '            invocation = ShowcaseInvocation.model_validate_json(bytes(body))',
+          ]
+          s = s.replace('            invocation = ShowcaseInvocation.model_validate(await request.json())', '\n'.join(lines))
           p.write_text(s)
           p = Path('deploy/showcase-runtime/runtime.env.example')
           p.write_text(p.read_text().replace('MAX_REQUEST_BYTES=65536', 'MAX_REQUEST_BYTES=262144'))
-          # Keep existing admission limits for unrelated tools; the scoped adjustment
-          # is committed separately with its own regression tests.
           p = Path('src/my_data_hub/mcp/server.py')
           p.write_text(p.read_text().replace('request_timeout_seconds=300,', 'request_timeout_seconds=30,'))
           PY
