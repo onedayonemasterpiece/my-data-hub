@@ -131,6 +131,8 @@ The public static edge must send `X-Robots-Tag` with the complete private-surfac
 policy (`noindex`, `nofollow`, `noarchive`, `nosnippet`, `noimageindex`), plus
 `Referrer-Policy: no-referrer` and the repository CSP. Acceptance checks the live
 response rather than only the checked-in Nginx template.
+At the required `390x844` viewport, long audience/status badges wrap inside the
+card body; the document must not acquire horizontal overflow.
 
 ## Deploy, discovery, and readback acceptance
 

@@ -64,6 +64,15 @@ def test_showcase_csp_allows_only_same_origin_scripts() -> None:
     assert not re.search(r"script-src[^;\"]*'unsafe-inline'", csp)
 
 
+def test_mobile_cards_allow_long_badges_to_wrap_without_expanding_the_grid() -> None:
+    css = (SITE / "src" / "styles" / "global.css").read_text(encoding="utf-8")
+
+    assert ".idea-card__body { min-width: 0; }" in css
+    assert ".idea-card__heading { display: flex; flex-wrap: wrap;" in css
+    assert ".badge { display: inline-flex; max-width: 100%;" in css
+    assert "overflow-wrap: anywhere;" in css
+
+
 def test_showcase_asset_filters_category_readiness_and_search() -> None:
     asset = SITE / "src" / "scripts" / "showcase-filters.js"
     scenario = textwrap.dedent(
