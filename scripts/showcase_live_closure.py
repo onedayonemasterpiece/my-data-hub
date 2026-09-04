@@ -74,6 +74,14 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def select_disposable_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select two source-backed items without assuming optional taxonomy fields."""
+
+    eligible = [item for item in items if isinstance(item.get("id"), str) and item["id"]]
+    require(len(eligible) >= 2, "DISPOSABLE_VIEW_ITEMS_UNAVAILABLE")
+    return deepcopy(eligible[:2])
+
+
 def mask_url(url: str) -> str:
     parts = urlsplit(url)
     segments = [segment for segment in parts.path.split("/") if segment]
@@ -368,12 +376,12 @@ async def run() -> int:
             httpx2.AsyncClient(
                 headers={"Authorization": f"Bearer {token}"},
                 follow_redirects=False,
-                timeout=httpx2.Timeout(45.0, connect=10.0),
+                timeout=httpx2.Timeout(240.0, connect=10.0),
             ) as client,
             streamable_http_client(endpoint, http_client=client) as streams,
         ):
             read_stream, write_stream = streams
-            async with ClientSession(read_stream, write_stream, read_timeout_seconds=90) as session:
+            async with ClientSession(read_stream, write_stream, read_timeout_seconds=240) as session:
                 await session.initialize()
                 listed = await session.list_tools()
                 names = sorted(tool.name for tool in listed.tools)
@@ -502,13 +510,7 @@ async def run() -> int:
                     "build": build_evidence(link_restored, main_url),
                 }
 
-                eligible_items = [
-                    item
-                    for item in original_source["items"]
-                    if item.get("capability_type") in {"technical", "product", "business"}
-                ]
-                require(len(eligible_items) >= 2, "DISPOSABLE_VIEW_ITEMS_UNAVAILABLE")
-                disposable_items = deepcopy(eligible_items[:2])
+                disposable_items = select_disposable_items(original_source["items"])
                 disposable_view = {
                     "schema_version": 1,
                     "id": disposable_view_id,
