@@ -58,7 +58,9 @@ runtime env, GitHub deploy key, or renderer configuration to `remote-mcp`.
 
 Production source access uses a repository-scoped GitHub deploy key registered read-only
 on `onedayonemasterpiece/idea-hub`. Mount its private half only into showcase-runtime and
-pin GitHub SSH host keys. Do not reuse the owner's broad CLI token.
+pin GitHub SSH host keys. A distinct write-enabled deploy key may be mounted only as
+`MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE`; it is repo/ref/root bounded by the
+runtime and is never a broad owner credential. Do not reuse the owner's broad CLI token.
 
 Set the host deployment env:
 
@@ -66,6 +68,7 @@ Set the host deployment env:
 MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE=/srv/my-data-hub/showcase/gateway-edge.key
 MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE=/srv/my-data-hub/showcase/gateway-runtime.key
 MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE=/srv/my-data-hub/showcase/idea-hub-deploy-key
+MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE=/srv/my-data-hub/showcase/idea-hub-write-key
 MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE=/srv/my-data-hub/showcase/github-known-hosts
 MY_DATA_HUB_SHOWCASE_PUBLIC_DIR=/srv/my-data-hub/showcase/public
 MY_DATA_HUB_SHOWCASE_STATE_DIR=/srv/my-data-hub/showcase/state

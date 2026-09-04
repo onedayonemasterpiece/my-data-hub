@@ -361,3 +361,168 @@ class GitSshShowcaseSource:
             self._run(["git", "checkout", "--quiet", "--detach", revision], cwd=checkout, env=env)
             bundle = FilesystemShowcaseSource(checkout / self.root).load_bundle(view_id)
             return bundle.model_copy(update={"source_revision": revision})
+
+
+class GitSshShowcaseWriter:
+    """Repo/ref/root-bounded Showcase writer using a dedicated SSH deploy key."""
+
+    def __init__(
+        self,
+        *,
+        key_file: Path,
+        known_hosts_file: Path,
+        repository: str = "onedayonemasterpiece/idea-hub",
+        ref: str = "main",
+        root: str = "showcase",
+        timeout_seconds: int = 60,
+    ) -> None:
+        if repository != "onedayonemasterpiece/idea-hub" or ref != "main" or root.strip("/") != "showcase":
+            raise ValueError("Git SSH Showcase writer is limited to the configured idea-hub main showcase root")
+        self._source = GitSshShowcaseSource(
+            key_file=key_file,
+            known_hosts_file=known_hosts_file,
+            repository=repository,
+            ref=ref,
+            root=root,
+            timeout_seconds=timeout_seconds,
+        )
+        self.key_file = self._source.key_file
+        self.known_hosts_file = self._source.known_hosts_file
+        self.repository = repository
+        self.ref = ref
+        self.root = "showcase"
+        self.timeout_seconds = timeout_seconds
+
+    def _env(self) -> dict[str, str]:
+        return {
+            **os.environ,
+            "GIT_SSH_COMMAND": shlex.join(
+                [
+                    "ssh",
+                    "-i",
+                    str(self.key_file),
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "IdentitiesOnly=yes",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    f"UserKnownHostsFile={self.known_hosts_file}",
+                ]
+            ),
+        }
+
+    def _run(self, argv: list[str], *, cwd: Path) -> str:
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=self._env(),
+                text=True,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ShowcaseSourceError("Git SSH Showcase write command failed") from exc
+        if result.returncode:
+            raise ShowcaseSourceError("Git SSH Showcase write conflict or command failure")
+        return result.stdout.strip()
+
+    @staticmethod
+    def _safe_files(files: dict[str, str]) -> dict[str, str]:
+        if not files:
+            raise ShowcaseSourceError("Showcase write requires files")
+        safe: dict[str, str] = {}
+        for relative, content in files.items():
+            path = Path(relative)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or len(path.parts) != 2
+                or path.parts[0] not in {"views", "items"}
+                or not path.name.endswith(".yaml")
+                or not path.stem
+                or not isinstance(content, str)
+            ):
+                raise ShowcaseSourceError("unsafe showcase source path")
+            safe[relative] = content
+        return safe
+
+    def _checkout(self, checkout: Path, expected_revision: str) -> None:
+        self._run(["git", "init", "--quiet"], cwd=checkout)
+        self._run(["git", "remote", "add", "origin", f"git@github.com:{self.repository}.git"], cwd=checkout)
+        self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout)
+        head = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout)
+        if head != expected_revision:
+            raise ShowcaseSourceError("source revision conflict")
+        self._run(["git", "checkout", "--quiet", "--detach", head], cwd=checkout)
+
+    def _commit(
+        self, *, expected_revision: str, files: dict[str, str], message: str, create_view_id: str | None
+    ) -> str:
+        if len(expected_revision) != 40 or any(c not in "0123456789abcdef" for c in expected_revision):
+            raise ShowcaseSourceError("source revision conflict")
+        safe = self._safe_files(files)
+        with TemporaryDirectory(prefix="showcase-git-writer-") as temp:
+            checkout = Path(temp)
+            self._checkout(checkout, expected_revision)
+            root = (checkout / self.root).resolve()
+            if not root.is_dir() or root.is_symlink():
+                raise ShowcaseSourceError("configured Showcase root is unavailable")
+            if create_view_id is not None:
+                target = root / "views" / f"{create_view_id}.yaml"
+                if target.exists() or target.is_symlink():
+                    raise ShowcaseSourceError("showcase view already exists")
+            for relative, content in sorted(safe.items()):
+                target = (root / relative).resolve()
+                if target.parent != (root / Path(relative).parent).resolve() or not target.is_relative_to(root):
+                    raise ShowcaseSourceError("unsafe showcase source path")
+                if target.exists() and target.is_symlink():
+                    raise ShowcaseSourceError("unsafe showcase source path")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8", newline="\n")
+            self._run(["git", "add", "--", *sorted(str(Path(self.root) / p) for p in safe)], cwd=checkout)
+            self._run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=my-data-hub Showcase",
+                    "-c",
+                    "user.email=showcase@localhost",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    message,
+                ],
+                cwd=checkout,
+            )
+            revision = self._run(["git", "rev-parse", "HEAD"], cwd=checkout)
+            self._run(
+                [
+                    "git",
+                    "push",
+                    "--quiet",
+                    "origin",
+                    f"HEAD:refs/heads/{self.ref}",
+                    f"--force-with-lease=refs/heads/{self.ref}:{expected_revision}",
+                ],
+                cwd=checkout,
+            )
+            return revision
+
+    def apply(self, *, expected_revision: str, files: dict[str, str], message: str) -> str:
+        return self._commit(expected_revision=expected_revision, files=files, message=message, create_view_id=None)
+
+    def create(self, *, view_id: str, files: dict[str, str], message: str) -> str:
+        if not view_id or "/" in view_id or view_id in {".", ".."}:
+            raise ShowcaseSourceError("unsafe showcase view id")
+        # The fetched branch head is the create CAS base; path absence is checked there.
+        with TemporaryDirectory(prefix="showcase-git-create-head-") as temp:
+            checkout = Path(temp)
+            self._run(["git", "init", "--quiet"], cwd=checkout)
+            self._run(["git", "remote", "add", "origin", f"git@github.com:{self.repository}.git"], cwd=checkout)
+            self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout)
+            head = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout)
+        return self._commit(expected_revision=head, files=files, message=message, create_view_id=view_id)

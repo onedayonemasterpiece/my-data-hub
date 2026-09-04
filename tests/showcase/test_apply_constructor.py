@@ -141,3 +141,25 @@ def test_publish_failure_is_explicit_and_rebuild_recovers(tmp_path: Path) -> Non
     manager.rebuild = ShowcaseManager.rebuild.__get__(manager)  # type: ignore[method-assign]
     recovered = manager.rebuild("new-partner")
     assert recovered["status"] == "published"
+
+
+def test_writer_env_prefers_explicit_token_over_write_ssh_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from my_data_hub.showcase.manager import ShowcaseManager
+    from my_data_hub.showcase.source import GitHubShowcaseWriter
+
+    key = tmp_path / "key"
+    key.write_text("key", encoding="utf-8")
+    key.chmod(0o600)
+    known = tmp_path / "known"
+    known.write_text("github.com", encoding="utf-8")
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_SOURCE_ROOT", str(FIXTURES))
+    monkeypatch.delenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE", raising=False)
+    assert ShowcaseManager.from_env().writer is None
+    monkeypatch.delenv("MY_DATA_HUB_SHOWCASE_SOURCE_ROOT")
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN", "read-token")
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE", str(key))
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE", str(known))
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE", str(key))
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN", "write-token")
+    assert isinstance(ShowcaseManager.from_env().writer, GitHubShowcaseWriter)

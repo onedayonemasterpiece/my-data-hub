@@ -16,6 +16,7 @@ from .source import (
     GitHubShowcaseSource,
     GitHubShowcaseWriter,
     GitSshShowcaseSource,
+    GitSshShowcaseWriter,
     ShowcaseSource,
     ShowcaseSourceError,
     ShowcaseSourceNotFoundError,
@@ -36,7 +37,7 @@ class ShowcaseManager:
         builder: AstroShowcaseBuilder,
         publisher: ShowcasePublisher,
         origin: str,
-        writer: GitHubShowcaseWriter | None = None,
+        writer: GitHubShowcaseWriter | GitSshShowcaseWriter | None = None,
     ) -> None:
         self.source = source
         self.state = state
@@ -105,8 +106,17 @@ class ShowcaseManager:
             )
         writer = None
         write_token = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN", "").strip()
+        write_ssh_key_file = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE", "").strip()
         if write_token and not source_root:
             writer = GitHubShowcaseWriter(token=write_token, repository=repository, ref=ref, root=root)
+        elif write_ssh_key_file and not source_root:
+            writer = GitSshShowcaseWriter(
+                key_file=Path(write_ssh_key_file),
+                known_hosts_file=Path(known_hosts_file),
+                repository=repository,
+                ref=ref,
+                root=root,
+            )
         return cls(
             source=source,
             writer=writer,
