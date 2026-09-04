@@ -103,3 +103,12 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
         "readiness": {"count": "1 возможность", "visible": 1},
         "searchResult": {"count": "1 возможность", "visible": 1},
     }
+
+def test_share_controls_and_static_svg_routes_exist() -> None:
+    index = (SITE / "src/pages/index.astro").read_text(encoding="utf-8")
+    detail = (SITE / "src/pages/ideas/[id].astro").read_text(encoding="utf-8")
+    share = (SITE / "src/scripts/showcase-share.js").read_text(encoding="utf-8")
+    assert "ShareButton" in index and "ShareButton" in detail
+    assert "navigator.share" in share and "navigator.canShare" in share and "clipboard" in share
+    assert (SITE / "src/pages/share/idea-hub.svg.ts").is_file()
+    assert (SITE / "src/pages/share/[id].svg.ts").is_file()

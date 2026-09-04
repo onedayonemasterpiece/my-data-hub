@@ -84,3 +84,6 @@ h1 { margin: 0; font-size: clamp(2rem, 8vw, 3.5rem); line-height: 1.04; letter-s
   .idea-card { transition: transform .18s ease, box-shadow .18s ease; }
   .idea-card:hover { transform: translateY(-2px); box-shadow: 0 14px 38px rgb(27 34 55 / 12%); }
 }
+.share-controls { display:flex; flex-wrap:wrap; gap:.55rem; margin:1rem 0; align-items:center; }
+.share-button,.share-copy,.share-download { border:1px solid #285a86; border-radius:.55rem; background:#fff; color:#123; padding:.55rem .8rem; font:inherit; text-decoration:none; cursor:pointer; }
+.share-button { background:#164e7d; color:#fff; }

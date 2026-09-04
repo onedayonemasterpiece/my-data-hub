@@ -235,11 +235,13 @@ class ShowcaseOperationJournal:
         document: dict[str, Any],
         operation_key: str,
         result: Mapping[str, Any] | list[Any],
+        fingerprint: str | None = None,
     ) -> None:
         completed = document.setdefault("completed", {})
         completed[operation_key] = {
             "completed_at": int(time.time()),
             "result": result,
+            "fingerprint": fingerprint,
         }
         overflow = len(completed) - self.completed_limit
         if overflow > 0:
@@ -399,11 +401,19 @@ class ShowcaseOperationController:
                 if not isinstance(result, (dict, list)):
                     raise ShowcaseRuntimeError("showcase manager returned an invalid link result")
                 return result
+            if tool == "showcase.get_source":
+                result = self.manager.get_source(view_id)
+                if not isinstance(result, dict):
+                    raise ShowcaseRuntimeError("showcase manager returned an invalid source result")
+                return result
             idempotency_key = _validate_idempotency_key(arguments.get("idempotency_key"))
             operation_key = _operation_key(tool, view_id, idempotency_key)
             journal = self.journal.load()
             completed = journal.get("completed", {}).get(operation_key)
+            fingerprint = hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             if isinstance(completed, Mapping) and isinstance(completed.get("result"), (dict, list)):
+                if completed.get("fingerprint") not in {None, fingerprint}:
+                    raise ShowcaseRuntimeConflictError("idempotency key was previously used with different payload")
                 return _with_duplicate(completed["result"], True)
             if tool == "showcase.rotate_link":
                 result = self._rotate(
@@ -413,8 +423,16 @@ class ShowcaseOperationController:
                     journal=journal,
                 )
             else:
+                if tool == "showcase.apply":
+                    result = _call_method(self.manager, "apply", view_id, expected_source_revision=arguments.get("expected_source_revision"), view=arguments.get("view"), items=arguments.get("items", []), dry_run=arguments.get("dry_run", True), publish=arguments.get("publish", False), idempotency_key=idempotency_key)
+                    if not isinstance(result, (dict, list)):
+                        raise ShowcaseRuntimeError("showcase manager returned an invalid result")
+                    self.journal.remember(journal, operation_key, result, fingerprint)
+                    self.journal.save(journal)
+                    return _with_duplicate(result, False)
                 method_name = {
                     "showcase.rebuild": "rebuild",
+                    "showcase.apply": "apply",
                     "showcase.create_view": "create_view",
                     "showcase.revoke_link": "revoke_link",
                 }[tool]

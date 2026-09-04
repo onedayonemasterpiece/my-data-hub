@@ -26,6 +26,8 @@ class ShowcaseSourceError(RuntimeError):
 class ShowcaseSource(Protocol):
     def load_bundle(self, view_id: str) -> ShowcaseBundle: ...
 
+    def get_source(self, view_id: str) -> ShowcaseBundle: ...
+
 
 def _parse_yaml(raw: str, *, label: str) -> dict[str, object]:
     try:
@@ -60,6 +62,9 @@ class FilesystemShowcaseSource:
             digest.update(self._read(relative).encode())
             digest.update(b"\n")
         return digest.hexdigest()
+
+    def get_source(self, view_id: str) -> ShowcaseBundle:
+        return self.load_bundle(view_id)
 
     def load_bundle(self, view_id: str) -> ShowcaseBundle:
         view_path = f"views/{view_id}.yaml"
@@ -159,6 +164,50 @@ class GitHubShowcaseSource:
         return ShowcaseBundle(source_revision=revision, view=view, items=items)
 
 
+    def get_source(self, view_id: str) -> ShowcaseBundle:
+        return self.load_bundle(view_id)
+
+
+class GitHubShowcaseWriter:
+    """Bounded GitHub Git-Data writer for only showcase views and items."""
+    def __init__(self, *, token: str, repository: str, ref: str = "main", root: str = "showcase", timeout_seconds: int = 20) -> None:
+        if not token:
+            raise ShowcaseSourceError("Showcase source write credential is unavailable")
+        self.token, self.repository, self.ref, self.root, self.timeout_seconds = token, repository, ref, root.strip("/"), timeout_seconds
+
+    def _request(self, url: str, *, method: str = "GET", payload: dict[str, object] | None = None) -> dict[str, object]:
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = Request(url, data=body, method=method, headers={"Accept":"application/vnd.github+json","Authorization":f"Bearer {self.token}","Content-Type":"application/json","User-Agent":"my-data-hub-ideahub-showcase/1","X-GitHub-Api-Version":"2022-11-28"})
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response: result=json.load(response)
+        except HTTPError as exc:
+            raise ShowcaseSourceError(f"GitHub source write returned HTTP {exc.code}") from exc
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise ShowcaseSourceError("GitHub source write request failed") from exc
+        if not isinstance(result, dict): raise ShowcaseSourceError("GitHub source write returned an unexpected response")
+        return result
+
+    def apply(self, *, expected_revision: str, files: dict[str, str], message: str) -> str:
+        base=f"https://api.github.com/repos/{self.repository}/git"
+        refdoc=self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
+        current=str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
+        if current != expected_revision: raise ShowcaseSourceError("source revision conflict")
+        commit=self._request(f"{base}/commits/{current}")
+        tree=str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
+        entries=[]
+        for relative, content in sorted(files.items()):
+            if not relative.startswith(("views/", "items/")) or "/" in relative.split("/", 1)[1] or not relative.endswith(".yaml"):
+                raise ShowcaseSourceError("unsafe showcase source path")
+            entries.append({"path":f"{self.root}/{relative}","mode":"100644","type":"blob","content":content})
+        newtree=self._request(f"{base}/trees", method="POST", payload={"base_tree":tree,"tree":entries})
+        tree_sha=str(newtree.get("sha", ""))
+        newcommit=self._request(f"{base}/commits", method="POST", payload={"message":message,"tree":tree_sha,"parents":[current]})
+        new_sha=str(newcommit.get("sha", ""))
+        # CAS update; GitHub rejects a non-fast-forward update.
+        self._request(f"{base}/refs/heads/{quote(self.ref, safe='')}", method="PATCH", payload={"sha":new_sha,"force":False})
+        return new_sha
+
+
 class GitSshShowcaseSource:
     """Read an exact private-repository revision through a read-only deploy key."""
 
@@ -206,6 +255,9 @@ class GitSshShowcaseSource:
         if result.returncode != 0:
             raise ShowcaseSourceError(f"Git SSH source command failed: {argv[0]} {argv[1]}")
         return result.stdout.strip()
+
+    def get_source(self, view_id: str) -> ShowcaseBundle:
+        return self.load_bundle(view_id)
 
     def load_bundle(self, view_id: str) -> ShowcaseBundle:
         ssh_command = shlex.join(

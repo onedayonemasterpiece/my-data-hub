@@ -18,6 +18,8 @@ SHOWCASE_TOOLS = frozenset(
     {
         "showcase.list",
         "showcase.get_link",
+        "showcase.get_source",
+        "showcase.apply",
         "showcase.rebuild",
         "showcase.rotate_link",
         "showcase.create_view",
@@ -198,6 +200,13 @@ class ShowcaseGatewayClient:
 
     def get_link(self, view_id: str) -> dict[str, Any] | list[Any]:
         return self._invoke("showcase.get_link", {"view_id": view_id})
+
+
+    def get_source(self, view_id: str) -> dict[str, Any] | list[Any]:
+        return self._invoke("showcase.get_source", {"view_id": view_id})
+
+    def apply(self, view_id: str, *, expected_source_revision: str, view: dict[str, Any] | None, items: list[dict[str, Any]], dry_run: bool = True, publish: bool = False, idempotency_key: str) -> dict[str, Any] | list[Any]:
+        return self._invoke("showcase.apply", {"view_id": view_id, "expected_source_revision": expected_source_revision, "view": view, "items": items, "dry_run": dry_run, "publish": publish, "idempotency_key": idempotency_key})
 
     def rebuild(
         self,

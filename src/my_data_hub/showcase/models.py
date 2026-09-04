@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _ID_PATTERN = r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
 Tone = Literal["blue", "green", "orange", "purple", "red", "neutral"]
 Visibility = Literal["public", "partner"]
+CapabilityType = Literal["technical", "product", "business"]
 
 
 class StrictModel(BaseModel):
@@ -41,6 +42,7 @@ class ShowcaseItem(StrictModel):
     summary: str = Field(min_length=10, max_length=220)
     audience: Label
     category: Category
+    capability_type: CapabilityType | None = None
     maturity: StatusLabel
     effort: StatusLabel
     benefit: str = Field(min_length=10, max_length=500)
@@ -67,6 +69,7 @@ class ShowcaseItem(StrictModel):
             self.summary,
             self.audience.label,
             self.category.label,
+            self.capability_type or "",
             self.maturity.label,
             self.effort.label,
             self.benefit,
@@ -80,6 +83,7 @@ class ShowcaseItem(StrictModel):
             "summary": self.summary,
             "audience": self.audience.model_dump(),
             "category": self.category.model_dump(),
+            "capability_type": self.capability_type,
             "maturity": self.maturity.model_dump(),
             "effort": self.effort.model_dump(),
             "benefit": self.benefit,

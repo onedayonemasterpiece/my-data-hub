@@ -55,6 +55,7 @@ _READ = (
     ("data.query", "data:read"),
     ("data.change.status", "operation:read"),
     ("showcase.list", "showcase:read"),
+    ("showcase.get_source", "showcase:read"),
 )
 
 _WRITES = (
@@ -105,6 +106,7 @@ _WRITES = (
         idempotent=True,
         role="operator",
     ),
+    ToolContract("showcase.apply", "showcase:write", False, idempotent=True, open_world=True, role="operator"),
     ToolContract(
         "showcase.rebuild",
         "showcase:write",

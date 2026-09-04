@@ -89,7 +89,7 @@ schemas to the existing unified owner/operator grant identified by
 the exact Showcase scope is authorized, and reader grants remain unable to see
 the new actions. After deployment, refresh the app catalog, invoke a Showcase
 action to complete incremental authorization if prompted, then refresh once
-more and verify the six actions in the ChatGPT app UI.
+more and verify `showcase.get_source` and `showcase.apply` alongside the existing actions in the ChatGPT app UI.
 
 ## Build and start
 

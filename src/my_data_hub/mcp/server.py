@@ -48,6 +48,7 @@ from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
 from my_data_hub.showcase.gateway import ShowcaseGatewayClient
 from my_data_hub.showcase.manager import ShowcaseManager
+from my_data_hub.showcase.models import ShowcaseItem, ShowcaseView
 from my_data_hub.workloads.bloggers.discovery import (
     SubmitDiscoveryBatch,
     validate_submit_discovery_batch,
@@ -57,6 +58,8 @@ _SHOWCASE_TOOL_NAMES = frozenset(
     {
         "showcase.list",
         "showcase.get_link",
+        "showcase.get_source",
+        "showcase.apply",
         "showcase.rebuild",
         "showcase.create_view",
         "showcase.rotate_link",
@@ -411,6 +414,12 @@ def create_server(
 
     async def showcase_get_link(view_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(showcase_manager().get_link, view_id)
+
+    async def showcase_get_source(view_id: str) -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(showcase_manager().get_source, view_id)
+
+    async def showcase_apply(view_id: str, expected_source_revision: str, view: ShowcaseView | None, items: list[ShowcaseItem] = [], dry_run: bool = True, publish: bool = False, idempotency_key: str = "") -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(showcase_manager().apply, view_id, expected_source_revision=expected_source_revision, view=view, items=items, dry_run=dry_run, publish=publish, idempotency_key=idempotency_key)
 
     async def showcase_rebuild(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
         return await asyncio.to_thread(
@@ -883,6 +892,8 @@ def create_server(
         "checkpoint.status": checkpoint_status,
         "showcase.list": showcase_list,
         "showcase.get_link": showcase_get_link,
+        "showcase.get_source": showcase_get_source,
+        "showcase.apply": showcase_apply,
         "showcase.rebuild": showcase_rebuild,
         "showcase.create_view": showcase_create_view,
         "showcase.rotate_link": showcase_rotate_link,

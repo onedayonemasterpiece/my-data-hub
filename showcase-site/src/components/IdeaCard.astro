@@ -1,5 +1,6 @@
 ---
 import Badge from './Badge.astro';
+import ShareButton from './ShareButton.astro';
 
 interface Props {
   item: {
@@ -8,6 +9,7 @@ interface Props {
     summary: string;
     audience: { id: string; label: string };
     category: { id: string; label: string; icon: string };
+    capability_type?: string | null;
     maturity: { id: string; label: string; tone: string };
     effort: { id: string; label: string; tone: string };
     search_text: string;
@@ -21,6 +23,7 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
   data-showcase-card
   data-audience={item.audience.id}
   data-category={item.category.id}
+  data-capability-type={item.capability_type || ''}
   data-maturity={item.maturity.id}
   data-effort={item.effort.id}
   data-search={item.search_text}
@@ -41,5 +44,6 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
         Подробнее <span aria-hidden="true">→</span>
       </a>
     </div>
+    <ShareButton title={item.title} text={item.summary} image={`${basePath}/share/${item.id}.svg`} />
   </div>
 </article>

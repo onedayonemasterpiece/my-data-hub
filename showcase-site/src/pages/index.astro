@@ -3,6 +3,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import IdeaCard from '../components/IdeaCard.astro';
 import { loadShowcase } from '../lib/showcase-data.mjs';
 import showcaseFiltersUrl from '../scripts/showcase-filters.js?url&no-inline';
+import showcaseShareUrl from '../scripts/showcase-share.js?url&no-inline';
+import ShareButton from '../components/ShareButton.astro';
 
 const showcase = loadShowcase();
 const { view, items } = showcase;
@@ -38,6 +40,10 @@ const options = (key) => [...new Map(items.map((item) => [item[key].id, item[key
           {options('category').map(([value, label]) => <option value={value}>{label}</option>)}
         </select>
       </label>
+      {items.some((item) => item.capability_type) && <label>
+        <span class="sr-only">Тип решения</span>
+        <select data-showcase-filter="capabilityType"><option value="">Тип решения</option><option value="technical">Техническое</option><option value="product">Продуктовое</option><option value="business">Бизнесовое</option></select>
+      </label>}
       <label>
         <span class="sr-only">Готовность</span>
         <select data-showcase-filter="maturity">
@@ -71,5 +77,7 @@ const options = (key) => [...new Map(items.map((item) => [item[key].id, item[key
     </div>
   </footer>
 
+  <ShareButton title={view.title} text={view.subtitle} image={`${import.meta.env.BASE_URL.replace(/\/$/u, '')}/share/idea-hub.svg`} />
   <script type="module" src={showcaseFiltersUrl}></script>
+  <script type="module" src={showcaseShareUrl}></script>
 </BaseLayout>

@@ -41,3 +41,8 @@ def test_git_ssh_source_uses_sparse_blobless_checkout() -> None:
     )
     assert '["git", "sparse-checkout", "set", "--no-cone", f"/{self.root}/"]' in source
     assert '"--filter=blob:none"' in source
+
+def test_capability_type_is_backward_compatible_and_serialized() -> None:
+    bundle = FilesystemShowcaseSource(FIXTURES).load_bundle("main")
+    assert all(item.capability_type is None for item in bundle.items)
+    assert bundle.published()["items"][0]["capability_type"] is None

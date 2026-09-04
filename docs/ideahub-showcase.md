@@ -32,12 +32,14 @@ The standalone contract server in `my_data_hub.showcase.mcp_server` exposes:
 
 - `showcase.list` — list registered surfaces;
 - `showcase.get_link(view_id)` — return the current full link and last receipt;
+- `showcase.get_source(view_id)` — return the validated current view/items and exact source revision;
+- `showcase.apply(...)` — bounded optimistic source upsert with dry-run and optional publish;
 - `showcase.rebuild(view_id)` — validate, build, publish and return the same link;
 - `showcase.create_view(view_id, publish=true)` — register a source view with its own link;
 - `showcase.rotate_link(view_id)` — build under a new slug and revoke the old prefix;
 - `showcase.revoke_link(view_id)` — remove or disable the current prefix.
 
-The standard `my-data-hub` MCP server exposes the same six tools when
+The standard `my-data-hub` MCP server exposes the same eight tools when
 `MY_DATA_HUB_SHOWCASE_ENABLED=true` and the authenticated owner/operator token carries
 `showcase:read` and `showcase:write`. They therefore use the existing OAuth boundary,
 security metadata and audit path. `my-data-hub-showcase-mcp` remains only a local stdio
@@ -49,6 +51,7 @@ entry point for focused contract testing.
 |---|---|
 | `MY_DATA_HUB_SHOWCASE_ENABLED` | Enables the six tools in the standard my-data-hub MCP catalog. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN` | Read-only token for private `idea-hub` source files. |
+| `MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN` | Optional repository-scoped write token used only by `showcase.apply`; absence fails closed. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE` | Preferred production credential: private half of a repository-scoped, read-only GitHub deploy key. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE` | Pinned GitHub SSH host keys used with the deploy key. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY` | Defaults to `onedayonemasterpiece/idea-hub`. |

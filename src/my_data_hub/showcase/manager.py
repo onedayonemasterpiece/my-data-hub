@@ -9,9 +9,9 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from .builder import AstroShowcaseBuilder
-from .models import RegistryState, SurfaceState
+from .models import RegistryState, SurfaceState, ShowcaseItem, ShowcaseView
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
-from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitSshShowcaseSource, ShowcaseSource
+from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitHubShowcaseWriter, GitSshShowcaseSource, ShowcaseSource, ShowcaseSourceError
 from .state import ShowcaseStateStore
 
 
@@ -28,12 +28,14 @@ class ShowcaseManager:
         builder: AstroShowcaseBuilder,
         publisher: ShowcasePublisher,
         origin: str,
+        writer: GitHubShowcaseWriter | None = None,
     ) -> None:
         self.source = source
         self.state = state
         self.builder = builder
         self.publisher = publisher
         self.origin = origin.rstrip("/")
+        self.writer = writer
         self._lock = threading.RLock()
 
     @classmethod
@@ -93,8 +95,13 @@ class ShowcaseManager:
                 ),
                 origin=origin,
             )
+        writer = None
+        write_token = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN", "").strip()
+        if write_token and not source_root and not ssh_key_file:
+            writer = GitHubShowcaseWriter(token=write_token, repository=repository, ref=ref, root=root)
         return cls(
             source=source,
+            writer=writer,
             state=ShowcaseStateStore(
                 Path(
                     os.getenv(
@@ -125,6 +132,77 @@ class ShowcaseManager:
             "updated_at": surface.updated_at.isoformat(),
             "last_build": surface.last_build.model_dump(mode="json") if surface.last_build else None,
         }
+
+
+    def get_source(self, view_id: str) -> dict[str, Any]:
+        bundle = self.source.get_source(view_id)
+        return {
+            "schema_version": 1,
+            "source_revision": bundle.source_revision,
+            "view": bundle.view.model_dump(mode="json"),
+            "items": [item.model_dump(mode="json") for item in bundle.items],
+        }
+
+    def apply(
+        self,
+        view_id: str,
+        *,
+        expected_source_revision: str,
+        view: ShowcaseView | None,
+        items: list[ShowcaseItem],
+        dry_run: bool = True,
+        publish: bool = False,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and atomically update only current source view/item documents."""
+        if not expected_source_revision:
+            raise ShowcaseSourceError("expected_source_revision is required")
+        if isinstance(view, dict):
+            view = ShowcaseView.model_validate(view)
+        items = [ShowcaseItem.model_validate(item) if isinstance(item, dict) else item for item in items]
+        current = self.source.get_source(view_id)
+        if current.source_revision != expected_source_revision:
+            raise ShowcaseSourceError("source revision conflict")
+        if view is not None and view.id != view_id:
+            raise ShowcaseSourceError("view id mismatch")
+        proposed_view = view or current.view
+        by_id = {item.id: item for item in current.items}
+        for item in items:
+            by_id[item.id] = item
+        # Validate exactly the resulting included source. New items not referenced are allowed,
+        # but every referenced item must be present and publication policy must hold.
+        from .models import ShowcaseBundle
+        bundle = ShowcaseBundle(source_revision=current.source_revision, view=proposed_view, items=[by_id[item_id] for item_id in proposed_view.item_ids])
+        changed: dict[str, str] = {}
+        if view is not None:
+            changed[f"views/{view_id}.yaml"] = __import__("yaml").safe_dump(view.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
+        for item in items:
+            changed[f"items/{item.id}.yaml"] = __import__("yaml").safe_dump(item.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
+        result = {
+            "schema_version": 1, "status": "dry_run" if dry_run else "applied",
+            "previous_source_revision": current.source_revision,
+            "new_source_revision": current.source_revision if dry_run else None,
+            "changed_paths": sorted(changed), "view_count": 1, "item_count": len(bundle.items),
+            "validation": {"valid": True, "buildable": (self.builder.site_root / "package.json").is_file()},
+        }
+        if dry_run:
+            return result
+        if self.writer is None:
+            raise ShowcaseSourceError("Showcase source write credential is unavailable")
+        new_revision = self.writer.apply(expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}")
+        # Remote exact readback fences the renderer to the committed GitHub revision.
+        readback = self.source.get_source(view_id)
+        if readback.source_revision != new_revision:
+            raise ShowcaseSourceError("source readback did not resolve the committed revision")
+        result["new_source_revision"] = new_revision
+        if publish:
+            try:
+                published = self.rebuild(view_id, idempotency_key=idempotency_key)
+            except Exception as exc:
+                result.update({"status": "applied", "publish_failure": str(exc)})
+                return result
+            result.update({"status": "published", "publish": published})
+        return result
 
     def list_surfaces(self) -> dict[str, Any]:
         state = self.state.load()
