@@ -1,56 +1,35 @@
-name: Showcase bounded source materialization
+name: Showcase local test bundle
 on:
   push:
     branches: [work/showcase-product-mcp-20260904]
     paths: [.github/workflows/showcase-product-materialize.yml]
 permissions:
-  contents: write
+  contents: read
 jobs:
-  materialize:
-    if: github.repository == 'onedayonemasterpiece/my-data-hub'
+  export:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Materialize the reviewed source edits
+      - name: Package tracked source and test dependencies, never credentials
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('scripts/showcase_product_patch.py')
-          s = p.read_text()
-          # Correct the indentation of the preserved nested SSH checkout tail.
-          s = s.replace("'    bundle = FilesystemShowcaseSource", "'        bundle = FilesystemShowcaseSource")
-          s = s.replace('\\n    return bundle.model_copy', '\\n        return bundle.model_copy')
-          s = s.replace("'    with FilesystemShowcaseSource", "'        with FilesystemShowcaseSource")
-          s = s.replace('\\n        snapshot.revision = revision\\n        yield snapshot',
-                        '\\n            snapshot.revision = revision\\n            yield snapshot')
-          exec(compile(s, str(p), 'exec'))
-          PY
-          python scripts/showcase_transport_patch.py
-          python -m pip install ruff
-          ruff check --select I --fix src/my_data_hub/showcase src/my_data_hub/mcp/server.py
-          ruff format src/my_data_hub/showcase/requests.py src/my_data_hub/showcase/models.py src/my_data_hub/showcase/source.py src/my_data_hub/showcase/manager.py src/my_data_hub/showcase/gateway.py src/my_data_hub/showcase/runtime.py src/my_data_hub/showcase/mcp_server.py src/my_data_hub/mcp/server.py
-          python -m compileall -q src/my_data_hub/showcase src/my_data_hub/mcp/server.py
-          git diff --check
-      - name: Save the actual source, remove one-shot tooling
-        run: |
-          git rm scripts/showcase_product_patch.py scripts/showcase_transport_patch.py .github/workflows/showcase-product-materialize.yml
-          git add src/my_data_hub/showcase src/my_data_hub/mcp/server.py
-          git config user.name 'ChatGPT source maintenance'
-          git config user.email 'noreply@openai.com'
-          git commit -m 'feat(showcase): implement create-by-reference, protected edits and actionable MCP writes'
-          git push origin HEAD:work/showcase-product-mcp-20260904
-          git rev-parse HEAD
-      - name: Install test dependencies
-        run: |
-          python -m pip install -e '.[dev]'
+          mkdir -p /tmp/showcase-local/wheels
+          git archive --format=tar.gz HEAD > /tmp/showcase-local/source.tar.gz
+          git rev-parse HEAD > /tmp/showcase-local/source-revision.txt
+          python -m pip download -d /tmp/showcase-local/wheels mcp==2.0.0 ruff pytest-asyncio hypothesis 'psycopg[binary,pool]' pglast PyJWT
           cd showcase-site
           npm ci --no-audit --no-fund
-      - name: Existing Showcase regression suite
-        run: pytest -q tests/showcase
+          tar czf /tmp/showcase-local/node_modules.tar.gz node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: showcase-local-test-bundle
+          path: /tmp/showcase-local
+          retention-days: 3
