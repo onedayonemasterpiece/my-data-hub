@@ -150,3 +150,10 @@ def test_share_asset_has_image_payload_and_truthful_copy_fallback() -> None:
     assert "Текст и ссылка скопированы" in share
     assert "скопировать текст и ссылку" in share
     assert "AbortError" in share and "Поделиться отменено" in share
+
+
+def test_mobile_secret_note_cannot_force_horizontal_overflow() -> None:
+    css = (SITE / "src/styles/global.css").read_text(encoding="utf-8")
+    assert ".secret-note" in css
+    assert "max-width: 100%" in css
+    assert "flex-wrap: wrap" in css

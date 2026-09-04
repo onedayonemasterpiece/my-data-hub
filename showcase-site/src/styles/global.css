@@ -22,7 +22,7 @@ button, input, select { font: inherit; }
 .eyebrow { margin: 0 0 12px; color: #555ccf; font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 h1 { margin: 0; font-size: clamp(2rem, 8vw, 3.5rem); line-height: 1.04; letter-spacing: -.04em; }
 .hero__subtitle { margin: 12px 0 16px; color: var(--muted); font-size: 1.08rem; line-height: 1.55; }
-.secret-note { display: inline-flex; gap: 8px; align-items: center; margin: 0; padding: 9px 13px; border: 1px solid #eee7dd; border-radius: 999px; background: #fcfaf7; color: #6b6257; font-size: .9rem; }
+.secret-note { display: inline-flex; max-width: 100%; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0; padding: 9px 13px; border: 1px solid #eee7dd; border-radius: 999px; background: #fcfaf7; color: #6b6257; font-size: .9rem; }
 
 .controls { position: sticky; top: 0; z-index: 10; margin: 20px 0 16px; padding: 12px; border: 1px solid rgb(226 228 235 / 90%); border-radius: 20px; background: rgb(255 255 255 / 92%); box-shadow: 0 8px 24px rgb(20 27 46 / 5%); backdrop-filter: blur(16px); }
 .search-field { display: flex; gap: 10px; align-items: center; padding: 0 14px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
