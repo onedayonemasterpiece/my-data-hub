@@ -112,3 +112,9 @@ def test_share_controls_and_static_svg_routes_exist() -> None:
     assert "navigator.share" in share and "navigator.canShare" in share and "clipboard" in share
     assert (SITE / "src/pages/share/idea-hub.svg.ts").is_file()
     assert (SITE / "src/pages/share/[id].svg.ts").is_file()
+
+
+def test_production_telegram_cta_contract_is_preserved() -> None:
+    contract = (REPOSITORY / "docs" / "ideahub-showcase.md").read_text(encoding="utf-8")
+    assert "@confidentmax" in contract
+    assert "https://t.me/confidentmax" in contract

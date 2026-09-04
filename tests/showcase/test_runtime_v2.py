@@ -301,3 +301,8 @@ def test_full_link_requires_owner_write_scope(tmp_path: Path) -> None:
     response = client.post("/internal/mcp-showcase/invoke", headers=headers, json=body)
     assert response.status_code == 200
     assert response.json()["result"]["url"].endswith(f"/{OLD_SLUG}/")
+
+
+def test_apply_is_a_write_tool() -> None:
+    from my_data_hub.showcase.gateway import SHOWCASE_WRITE_TOOLS
+    assert "showcase.apply" in SHOWCASE_WRITE_TOOLS

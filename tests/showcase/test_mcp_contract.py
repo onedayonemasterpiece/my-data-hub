@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 
@@ -8,6 +9,8 @@ def test_mcp_module_declares_expected_tools() -> None:
     for name in (
         "showcase.list",
         "showcase.get_link",
+        "showcase.get_source",
+        "showcase.apply",
         "showcase.rebuild",
         "showcase.create_view",
         "showcase.rotate_link",
@@ -20,4 +23,4 @@ def test_showcase_source_tools_are_catalogued_with_bounded_apply_defaults() -> N
     from my_data_hub.showcase.mcp_server import create_server
     assert TOOL_CONTRACTS["showcase.get_source"].scope == "showcase:read"
     assert TOOL_CONTRACTS["showcase.apply"].scope == "showcase:write"
-    assert "showcase.apply" in str(create_server)
+    assert "showcase.apply" in inspect.getsource(create_server)

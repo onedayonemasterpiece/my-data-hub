@@ -11,6 +11,8 @@ RESOURCE = "https://mcp.example.test/mcp"
 SHOWCASE_TOOLS = {
     "showcase.list",
     "showcase.get_link",
+    "showcase.get_source",
+    "showcase.apply",
     "showcase.rebuild",
     "showcase.create_view",
     "showcase.rotate_link",

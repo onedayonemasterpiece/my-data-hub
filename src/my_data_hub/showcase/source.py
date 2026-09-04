@@ -23,6 +23,10 @@ class ShowcaseSourceError(RuntimeError):
     """Raised when a showcase source cannot produce one consistent snapshot."""
 
 
+class ShowcaseSourceNotFoundError(ShowcaseSourceError):
+    """Raised only when the requested bounded Showcase source object is absent."""
+
+
 class ShowcaseSource(Protocol):
     def load_bundle(self, view_id: str) -> ShowcaseBundle: ...
 
@@ -51,6 +55,8 @@ class FilesystemShowcaseSource:
             raise ShowcaseSourceError("source path escaped the configured root") from exc
         try:
             return path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ShowcaseSourceNotFoundError(f"showcase source is absent: {relative}") from exc
         except OSError as exc:
             raise ShowcaseSourceError(f"cannot read {relative}: {exc}") from exc
 
@@ -117,6 +123,8 @@ class GitHubShowcaseSource:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 payload = json.load(response)
         except HTTPError as exc:
+            if exc.code == 404:
+                raise ShowcaseSourceNotFoundError("showcase source is absent") from exc
             raise ShowcaseSourceError(f"GitHub returned HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             raise ShowcaseSourceError(f"GitHub source request failed: {exc}") from exc
@@ -206,6 +214,22 @@ class GitHubShowcaseWriter:
         # CAS update; GitHub rejects a non-fast-forward update.
         self._request(f"{base}/refs/heads/{quote(self.ref, safe='')}", method="PATCH", payload={"sha":new_sha,"force":False})
         return new_sha
+
+    def create(self, *, view_id: str, files: dict[str, str], message: str) -> str:
+        """Create a bounded view only if its view path is absent at the CAS base."""
+        base = f"https://api.github.com/repos/{self.repository}/git"
+        refdoc = self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
+        current = str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
+        if len(current) != 40:
+            raise ShowcaseSourceError("GitHub did not return an exact source revision")
+        commit = self._request(f"{base}/commits/{current}")
+        tree = str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
+        listing = self._request(f"{base}/trees/{quote(tree, safe='')}?recursive=1")
+        paths = {entry.get("path") for entry in listing.get("tree", []) if isinstance(entry, dict)} if isinstance(listing.get("tree"), list) else set()
+        target = f"{self.root}/views/{view_id}.yaml"
+        if target in paths:
+            raise ShowcaseSourceError("showcase view already exists")
+        return self.apply(expected_revision=current, files=files, message=message)
 
 
 class GitSshShowcaseSource:

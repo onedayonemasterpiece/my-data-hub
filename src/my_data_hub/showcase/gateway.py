@@ -28,6 +28,7 @@ SHOWCASE_TOOLS = frozenset(
 )
 SHOWCASE_WRITE_TOOLS = frozenset(
     {
+        "showcase.apply",
         "showcase.rebuild",
         "showcase.rotate_link",
         "showcase.create_view",

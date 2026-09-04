@@ -11,7 +11,7 @@ from typing import Any
 from .builder import AstroShowcaseBuilder
 from .models import RegistryState, SurfaceState, ShowcaseItem, ShowcaseView
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
-from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitHubShowcaseWriter, GitSshShowcaseSource, ShowcaseSource, ShowcaseSourceError
+from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitHubShowcaseWriter, GitSshShowcaseSource, ShowcaseSource, ShowcaseSourceError, ShowcaseSourceNotFoundError
 from .state import ShowcaseStateStore
 
 
@@ -97,7 +97,7 @@ class ShowcaseManager:
             )
         writer = None
         write_token = os.getenv("MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_TOKEN", "").strip()
-        if write_token and not source_root and not ssh_key_file:
+        if write_token and not source_root:
             writer = GitHubShowcaseWriter(token=write_token, repository=repository, ref=ref, root=root)
         return cls(
             source=source,
@@ -154,43 +154,70 @@ class ShowcaseManager:
         publish: bool = False,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Validate and atomically update only current source view/item documents."""
+        """Validate, CAS-write, and optionally publish a bounded Showcase bundle."""
         if not expected_source_revision:
             raise ShowcaseSourceError("expected_source_revision is required")
         if isinstance(view, dict):
             view = ShowcaseView.model_validate(view)
         items = [ShowcaseItem.model_validate(item) if isinstance(item, dict) else item for item in items]
-        current = self.source.get_source(view_id)
-        if current.source_revision != expected_source_revision:
+        creating = expected_source_revision == "absent"
+        try:
+            current = self.source.get_source(view_id)
+        except ShowcaseSourceNotFoundError:
+            if not creating:
+                raise
+            current = None
+        if creating and current is not None:
+            raise ShowcaseSourceError("showcase view already exists")
+        if not creating and current is None:
+            raise ShowcaseSourceError("showcase source is absent")
+        if not creating and current.source_revision != expected_source_revision:
             raise ShowcaseSourceError("source revision conflict")
         if view is not None and view.id != view_id:
             raise ShowcaseSourceError("view id mismatch")
-        proposed_view = view or current.view
-        by_id = {item.id: item for item in current.items}
+        if creating and view is None:
+            raise ShowcaseSourceError("CAS-create requires a complete view")
+        proposed_view = view if view is not None else current.view
+        by_id = {} if creating else {item.id: item for item in current.items}
         for item in items:
             by_id[item.id] = item
-        # Validate exactly the resulting included source. New items not referenced are allowed,
-        # but every referenced item must be present and publication policy must hold.
+        missing = [item_id for item_id in proposed_view.item_ids if item_id not in by_id]
+        if missing:
+            raise ShowcaseSourceError("view references items not included in the proposed bundle")
         from .models import ShowcaseBundle
-        bundle = ShowcaseBundle(source_revision=current.source_revision, view=proposed_view, items=[by_id[item_id] for item_id in proposed_view.item_ids])
+        bundle = ShowcaseBundle(
+            source_revision=("create-preview" if creating else current.source_revision),
+            view=proposed_view,
+            items=[by_id[item_id] for item_id in proposed_view.item_ids],
+        )
+        if creating and any(item.capability_type is None for item in bundle.items):
+            raise ShowcaseSourceError("new partner view items require capability_type")
         changed: dict[str, str] = {}
         if view is not None:
             changed[f"views/{view_id}.yaml"] = __import__("yaml").safe_dump(view.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
         for item in items:
             changed[f"items/{item.id}.yaml"] = __import__("yaml").safe_dump(item.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
-        result = {
-            "schema_version": 1, "status": "dry_run" if dry_run else "applied",
-            "previous_source_revision": current.source_revision,
-            "new_source_revision": current.source_revision if dry_run else None,
-            "changed_paths": sorted(changed), "view_count": 1, "item_count": len(bundle.items),
-            "validation": {"valid": True, "buildable": (self.builder.site_root / "package.json").is_file()},
+        result: dict[str, Any] = {
+            "schema_version": 1,
+            "status": "dry_run" if dry_run else "applied",
+            "previous_source_revision": "absent" if creating else current.source_revision,
+            "new_source_revision": "absent" if dry_run and creating else (current.source_revision if dry_run else None),
+            "changed_paths": sorted(changed),
+            "view_count": 1,
+            "item_count": len(bundle.items),
+            "validation": {"valid": True, "buildable": (getattr(self.builder, "site_root", Path("/nonexistent")) / "package.json").is_file()},
         }
         if dry_run:
             return result
         if self.writer is None:
             raise ShowcaseSourceError("Showcase source write credential is unavailable")
-        new_revision = self.writer.apply(expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}")
-        # Remote exact readback fences the renderer to the committed GitHub revision.
+        if creating:
+            create = getattr(self.writer, "create", None)
+            if not callable(create):
+                raise ShowcaseSourceError("Showcase source writer does not support CAS-create")
+            new_revision = create(view_id=view_id, files=changed, message=f"showcase: create {view_id}")
+        else:
+            new_revision = self.writer.apply(expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}")
         readback = self.source.get_source(view_id)
         if readback.source_revision != new_revision:
             raise ShowcaseSourceError("source readback did not resolve the committed revision")
@@ -198,8 +225,8 @@ class ShowcaseManager:
         if publish:
             try:
                 published = self.rebuild(view_id, idempotency_key=idempotency_key)
-            except Exception as exc:
-                result.update({"status": "applied", "publish_failure": str(exc)})
+            except Exception:
+                result.update({"status": "applied_not_published", "publish_failure": "publication failed; retry showcase.rebuild"})
                 return result
             result.update({"status": "published", "publish": published})
         return result
