@@ -14,6 +14,10 @@ def test_remote_mcp_receives_only_showcase_gateway_configuration() -> None:
     remote_section, runtime_section = source.split("\n  showcase-runtime:\n", maxsplit=1)
     assert "MY_DATA_HUB_SHOWCASE_GATEWAY_URL" in remote_section
     assert "MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE" in remote_section
+    assert (
+        'MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS: "${MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS:-180}"'
+        in remote_section
+    )
     assert "MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE" in remote_section
     for forbidden in (
         "GITHUB_TOKEN",

@@ -79,11 +79,18 @@ MY_DATA_HUB_SHOWCASE_PUBLIC_DIR=/srv/my-data-hub/showcase/public
 MY_DATA_HUB_SHOWCASE_STATE_DIR=/srv/my-data-hub/showcase/state
 MY_DATA_HUB_SHOWCASE_RUNTIME_ENV_FILE=/srv/my-data-hub/showcase/runtime.env
 MY_DATA_HUB_SHOWCASE_RUNTIME_PORT=8790
+MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS=180
 MY_DATA_HUB_SHOWCASE_IMAGE=my-data-hub-showcase:local
 MY_DATA_HUB_SHOWCASE_MEMORY_LIMIT=512m
 MY_DATA_HUB_SHOWCASE_CPU_LIMIT=1.00
 MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE=<existing-owner-scopes>,showcase:read,showcase:write
 ```
+
+Keep the edge-to-runtime timeout at `180` seconds: a cold Astro build and Git
+source round-trip can exceed the gateway library's generic 45-second default.
+The outer MCP client/read timeout used for operator publication must be at least
+as long. A client timeout does not prove that the source write or build stopped;
+always read the source and link back before retrying or rolling back.
 
 The OAuth owner/operator client receives `showcase:read` and
 `showcase:write`. A reader explicitly granted `showcase:read` may call

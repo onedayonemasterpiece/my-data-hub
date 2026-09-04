@@ -4,6 +4,7 @@ services:
       MY_DATA_HUB_SHOWCASE_ENABLED: "true"
       MY_DATA_HUB_SHOWCASE_GATEWAY_URL: "http://127.0.0.1:${MY_DATA_HUB_SHOWCASE_RUNTIME_PORT:-8790}/internal/mcp-showcase/invoke"
       MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE: /run/secrets/showcase-gateway.key
+      MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS: "${MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS:-180}"
       MY_DATA_HUB_MCP_SCOPES: "${MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE:?set the existing MCP scopes plus showcase:read and showcase:write}"
     volumes:
       - "${MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE:?set an absolute 0600 edge-token path}:/run/secrets/showcase-gateway.key:ro"
