@@ -1,14 +1,16 @@
-import sys
+import importlib.util
 from types import ModuleType
+from unittest.mock import patch
 
-playwright = ModuleType("playwright")
-playwright_async = ModuleType("playwright.async_api")
-playwright_async.Page = object
-playwright_async.async_playwright = object()
-sys.modules.setdefault("playwright", playwright)
-sys.modules.setdefault("playwright.async_api", playwright_async)
-
-from scripts.showcase_live_closure import resolve_page_url, select_disposable_items  # noqa: E402
+if importlib.util.find_spec("playwright") is None:
+    playwright = ModuleType("playwright")
+    playwright_async = ModuleType("playwright.async_api")
+    playwright_async.Page = object
+    playwright_async.async_playwright = object()
+    with patch.dict("sys.modules", {"playwright": playwright, "playwright.async_api": playwright_async}):
+        from scripts.showcase_live_closure import resolve_page_url, select_disposable_items
+else:
+    from scripts.showcase_live_closure import resolve_page_url, select_disposable_items
 
 
 def test_disposable_selection_does_not_require_optional_taxonomy() -> None:
