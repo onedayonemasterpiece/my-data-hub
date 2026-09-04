@@ -14,6 +14,7 @@ from my_data_hub.showcase.gateway import (
     ShowcaseGatewayError,
     ShowcaseGatewaySettings,
 )
+from my_data_hub.showcase.models import ShowcaseView
 from my_data_hub.showcase.runtime import (
     PrincipalDocument,
     ShowcaseOperationController,
@@ -165,6 +166,49 @@ def test_gateway_carries_only_service_token_and_principal(tmp_path: Path) -> Non
     serialized = json.dumps(document)
     assert "GITHUB" not in serialized
     assert "publisher" not in serialized.lower()
+
+
+def test_gateway_serializes_fastmcp_pydantic_arguments(tmp_path: Path) -> None:
+    path = token_file(tmp_path)
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.update(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"status": "dry_run"}})
+
+    client = ShowcaseGatewayClient(
+        ShowcaseGatewaySettings(
+            url="http://127.0.0.1:8790/internal/mcp-showcase/invoke",
+            token_file=path,
+        ),
+        default_identity=identity("showcase:write"),
+        transport=httpx.MockTransport(handler),
+    )
+    view = ShowcaseView.model_validate(
+        {
+            "id": "main",
+            "title": "Main view",
+            "subtitle": "Partner-facing ideas",
+            "item_ids": ["one-item"],
+            "contact": {
+                "value": "@owner",
+                "href": "https://t.me/owner",
+            },
+        }
+    )
+
+    assert client.apply(
+        "main",
+        expected_source_revision="a" * 40,
+        view=view,  # type: ignore[arg-type]  # FastMCP supplies the validated model.
+        items=[],
+        dry_run=True,
+        publish=False,
+        idempotency_key="showcase-apply-test",
+    ) == {"status": "dry_run"}
+    arguments = observed["arguments"]
+    assert isinstance(arguments, dict)
+    assert arguments["view"]["id"] == "main"
 
 
 def test_gateway_refuses_non_loopback_plain_http(tmp_path: Path, monkeypatch) -> None:

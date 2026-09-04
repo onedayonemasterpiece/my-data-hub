@@ -12,6 +12,11 @@ are complete for the deployed exact main successor.
 
 The runtime image installs the HTTP client used by the gateway, and the read-only
 static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
+Control-plane release preparation makes the archived release tree read/traverse-only
+for all runtime UIDs before removing every write bit. This is required because Compose
+bind-mounts `deploy/showcase-runtime/nginx.conf` into the unprivileged static edge;
+leaving the archive at the installer's `umask 077` permissions causes that edge to
+restart with `Permission denied` even though the release itself is immutable.
 The immutable renderer template is copied into the runtime's private `/work`
 tmpfs and made owner-writable there before Astro links its dependencies. The
 builder consumes that copy through `MY_DATA_HUB_SHOWCASE_SITE_ROOT`.

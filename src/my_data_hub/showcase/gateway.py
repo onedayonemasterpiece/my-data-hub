@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from pydantic import BaseModel
 
 from my_data_hub.auth.context import current_identity
 from my_data_hub.mcp.oauth import AccessIdentity
@@ -120,6 +121,18 @@ def _identity_document(identity: AccessIdentity) -> dict[str, Any]:
     }
 
 
+def _json_document(value: Any) -> Any:
+    """Normalize FastMCP-validated models at the private HTTP boundary."""
+
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, Mapping):
+        return {str(key): _json_document(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_document(child) for child in value]
+    return value
+
+
 class ShowcaseGatewayClient:
     """Synchronous exact-tool client used by the lightweight OAuth MCP edge.
 
@@ -167,7 +180,7 @@ class ShowcaseGatewayClient:
         identity = self._identity()
         payload = {
             "tool": tool,
-            "arguments": dict(arguments),
+            "arguments": _json_document(arguments),
             "principal": _identity_document(identity),
         }
         headers = {

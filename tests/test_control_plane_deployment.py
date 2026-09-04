@@ -134,6 +134,16 @@ def test_prepare_gate_cannot_start_or_enable_runtime() -> None:
     assert "exit 0" in prepare_block
 
 
+def test_immutable_release_is_readable_by_unprivileged_compose_services() -> None:
+    source = installer_source()
+    archive = source.index('git -C "$source_root" archive "$commit"')
+    moved = source.index('mv "$staging" "$release"', archive)
+    readable = source.index('chmod -R a+rX "$release"', moved)
+    immutable = source.index('chmod -R a-w "$release"', readable)
+    build = source.index('"$docker_path" build', immutable)
+    assert archive < moved < readable < immutable < build
+
+
 def test_install_unit_reconciles_all_opted_in_processes_across_failure_and_reboot() -> None:
     source = installer_source()
     assert "MY_DATA_HUB_APPROVED_CONTROL_COMMIT" in source

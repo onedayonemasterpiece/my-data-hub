@@ -82,6 +82,11 @@ if [[ ! -d "$release" ]]; then
   git -C "$source_root" archive "$commit" | tar -x -C "$staging"
   mv "$staging" "$release"
   trap - EXIT
+  # Compose may bind individual configuration files from this immutable tree
+  # into non-root containers (for example the unprivileged Showcase Nginx
+  # edge). Keep the archive readable/traversable while removing every write
+  # bit; umask 077 must not make those mounts unreadable at runtime.
+  chmod -R a+rX "$release"
   chmod -R a-w "$release"
 fi
 
