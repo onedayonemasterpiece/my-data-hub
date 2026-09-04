@@ -59,3 +59,30 @@ def test_interest_remains_usable_when_storage_is_disabled(live):
     expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(page.locator("[data-interest-message]")).to_be_hidden()
     context.close()
+
+
+def test_existing_live_browser_probe_supports_collapsed_optional_filters(live):
+    import json
+    import subprocess
+    import sys
+
+    _browser, url, *_ = live
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio,json,sys; from scripts.showcase_live_closure import browser_acceptance; "
+            "print(json.dumps(asyncio.run(browser_acceptance(sys.argv[1]))))",
+            url,
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+    receipt = json.loads(result.stdout)
+    assert receipt["filter_counts"]["capability_type"] is None
+    assert receipt["web_share_payload"] == "PASS"
+    assert receipt["card_count"] == 5
