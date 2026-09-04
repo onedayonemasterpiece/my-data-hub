@@ -34,12 +34,15 @@ def test_real_astro_build_is_checked_and_prefixed(tmp_path: Path) -> None:
     expected_asset = re.compile(rf'^/v/{re.escape(slug)}/_assets/[^"/]+\.js$')
     script_srcs = re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', index)
     same_origin_srcs = [source for source in script_srcs if expected_asset.fullmatch(source)]
-    assert len(same_origin_srcs) == 1
-    relative_asset = same_origin_srcs[0].removeprefix(f"/v/{slug}/")
-    asset = tmp_path / "dist" / relative_asset
-    assert asset.is_file()
-    asset_source = asset.read_text(encoding="utf-8")
-    for marker in ("data-showcase-filter", "showcase-result-count", "addEventListener"):
+    assert len(same_origin_srcs) == 2
+    assets = []
+    for script_src in same_origin_srcs:
+        relative_asset = script_src.removeprefix(f"/v/{slug}/")
+        asset = tmp_path / "dist" / relative_asset
+        assert asset.is_file()
+        assets.append(asset.read_text(encoding="utf-8"))
+    asset_source = "\n".join(assets)
+    for marker in ("data-showcase-filter", "showcase-result-count", "addEventListener", "navigator.share"):
         assert marker in asset_source
     detail_path = tmp_path / "dist" / "ideas" / "voice-cloning-audioguides" / "index.html"
     assert detail_path.exists()
