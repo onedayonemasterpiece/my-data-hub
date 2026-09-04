@@ -54,6 +54,10 @@ def test_real_astro_build_is_checked_and_prefixed(tmp_path: Path) -> None:
 
 def test_showcase_csp_allows_only_same_origin_scripts() -> None:
     nginx = NGINX.read_text(encoding="utf-8")
+    assert (
+        'add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;'
+        in nginx
+    )
     csp = next(line for line in nginx.splitlines() if "Content-Security-Policy" in line)
     assert "default-src 'self'" in csp
     assert "script-src 'self'" in csp

@@ -127,6 +127,11 @@ curl --fail --silent http://127.0.0.1:8791/healthz
 Do not expose port `8790` in Nginx, a tunnel, firewall rule or Docker
 published-port rule.
 
+The public static edge must send `X-Robots-Tag` with the complete private-surface
+policy (`noindex`, `nofollow`, `noarchive`, `nosnippet`, `noimageindex`), plus
+`Referrer-Policy: no-referrer` and the repository CSP. Acceptance checks the live
+response rather than only the checked-in Nginx template.
+
 ## Deploy, discovery, and readback acceptance
 
 Before accepting this runtime, deploy an exact committed main successor and record its
