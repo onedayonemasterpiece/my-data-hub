@@ -15,7 +15,7 @@ import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx2
 from mcp import ClientSession
@@ -100,6 +100,12 @@ def slug_from_url(url: str) -> str:
     segments = [segment for segment in urlsplit(url).path.split("/") if segment]
     require(bool(segments), "URL_WITHOUT_SLUG")
     return segments[-1]
+
+
+def resolve_page_url(base_url: str, href: str) -> str:
+    """Resolve same-origin root-relative links for Playwright navigation."""
+
+    return urljoin(base_url, href)
 
 
 def result_document(result: Any, tool: str) -> dict[str, Any]:
@@ -299,7 +305,7 @@ async def browser_acceptance(url: str) -> dict[str, Any]:
 
         detail_href = await page.locator(".idea-card__link").first.get_attribute("href")
         require(bool(detail_href), "BROWSER_DETAIL_LINK_MISSING")
-        detail_response = await page.goto(detail_href, wait_until="networkidle")
+        detail_response = await page.goto(resolve_page_url(url, detail_href), wait_until="networkidle")
         require(detail_response is not None and detail_response.status == 200, "BROWSER_DETAIL_NOT_200")
         require(await page.locator("[data-share]").count() >= 1, "BROWSER_DETAIL_SHARING_MISSING")
         require(
