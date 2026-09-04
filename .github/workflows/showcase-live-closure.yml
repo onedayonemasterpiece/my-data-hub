@@ -1,0 +1,48 @@
+name: IdeaHub Showcase live closure
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/showcase-live-closure.yml
+      - scripts/showcase_live_closure.py
+
+permissions:
+  contents: read
+
+jobs:
+  live-closure:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}
+      SHOWCASE_LIVE_RECEIPT: artifacts/showcase-live-closure.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install trusted MCP and browser verifier
+        run: |
+          python -m pip install -e '.[dev]' playwright
+          python -m playwright install chromium
+
+      - name: Run live MCP, static HTTP, and 390x844 browser closure
+        run: python scripts/showcase_live_closure.py
+
+      - name: Upload sanitized closure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: showcase-live-closure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/showcase-live-closure.json
+          if-no-files-found: error
+          retention-days: 30
