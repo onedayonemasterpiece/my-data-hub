@@ -60,6 +60,7 @@ async def test_standard_mcp_lists_showcase_tools_when_manager_is_enabled(monkeyp
     assert tools["showcase.rebuild"].annotations.idempotent_hint is True
     assert tools["showcase.rotate_link"].annotations.destructive_hint is True
     assert tools["showcase.rotate_link"].annotations.idempotent_hint is False
+    assert "items" not in tools["showcase.apply"].input_schema.get("required", [])
 
 
 @pytest.mark.asyncio
