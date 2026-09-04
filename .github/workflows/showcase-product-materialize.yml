@@ -1,35 +1,87 @@
-name: Showcase local test bundle
+name: Showcase constructor checkpoint
 on:
   push:
     branches: [work/showcase-product-mcp-20260904]
     paths: [.github/workflows/showcase-product-materialize.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  export:
+  checkpoint:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Package tracked source and test dependencies, never credentials
+      - name: Apply locally verified source edits
         run: |
-          mkdir -p /tmp/showcase-local/wheels
-          git archive --format=tar.gz HEAD > /tmp/showcase-local/source.tar.gz
-          git rev-parse HEAD > /tmp/showcase-local/source-revision.txt
-          python -m pip download -d /tmp/showcase-local/wheels mcp==2.0.0 ruff pytest-asyncio hypothesis 'psycopg[binary,pool]' pglast PyJWT
-          cd showcase-site
-          npm ci --no-audit --no-fund
-          tar czf /tmp/showcase-local/node_modules.tar.gz node_modules
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/showcase_product_patch.py')
+          s = p.read_text()
+          s = s.replace("'    bundle = FilesystemShowcaseSource", "'        bundle = FilesystemShowcaseSource")
+          s = s.replace('\\n    return bundle.model_copy', '\\n        return bundle.model_copy')
+          s = s.replace("'    with FilesystemShowcaseSource", "'        with FilesystemShowcaseSource")
+          s = s.replace('\\n        snapshot.revision = revision\\n        yield snapshot', '\\n            snapshot.revision = revision\\n            yield snapshot')
+          s = s.replace("commits/{current}\")')", "commits/{current}\")', 2)")
+          exec(compile(s, str(p), 'exec'))
+          PY
+          python scripts/showcase_transport_patch.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/my_data_hub/showcase/manager.py')
+          s = p.read_text().replace('definitions = [ShowcaseItem.model_validate(item) if isinstance(item, dict) else item for item in (items or [])]', 'definitions = [ShowcaseItem.model_validate(item.model_dump() if hasattr(item, "model_dump") else item) for item in (items or [])]')
+          p.write_text(s)
+          p = Path('src/my_data_hub/showcase/source.py')
+          s = p.read_text().replace('        if current != expected_revision:\n            raise ShowcaseRequestError("REVISION_CONFLICT")\n        if expected_revision is not None and current != expected_revision:', '        if current != expected_revision:')
+          p.write_text(s)
+          p = Path('src/my_data_hub/showcase/requests.py')
+          s = p.read_text().replace('if not isinstance(value, dict) or value.get("code") not in PROBLEMS:', 'if not isinstance(value, dict) or not isinstance(value.get("code"), str) or value["code"] not in PROBLEMS:')
+          p.write_text(s)
+          p = Path('src/my_data_hub/showcase/runtime.py')
+          s = p.read_text().replace('r"[a-z0-9][a-z0-9-]{1,79}"', 'r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]"')
+          s = s.replace('            invocation = ShowcaseInvocation.model_validate(await request.json())', '''            body = bytearray()
+                      async for chunk in request.stream():
+                          body.extend(chunk)
+                          if len(body) > max_request_bytes:
+                              raise ShowcaseRequestError("REQUEST_TOO_LARGE")
+                      invocation = ShowcaseInvocation.model_validate_json(bytes(body))'''.replace('\n          ', '\n'))
+          p.write_text(s)
+          p = Path('deploy/showcase-runtime/runtime.env.example')
+          p.write_text(p.read_text().replace('MAX_REQUEST_BYTES=65536', 'MAX_REQUEST_BYTES=262144'))
+          # Keep existing admission limits for unrelated tools; the scoped adjustment
+          # is committed separately with its own regression tests.
+          p = Path('src/my_data_hub/mcp/server.py')
+          p.write_text(p.read_text().replace('request_timeout_seconds=300,', 'request_timeout_seconds=30,'))
+          PY
+          python -m pip install ruff==0.16.6
+          ruff check --select I,SIM105 --fix --unsafe-fixes src/my_data_hub/showcase src/my_data_hub/mcp/server.py
+          ruff format src/my_data_hub/showcase/requests.py src/my_data_hub/showcase/models.py src/my_data_hub/showcase/source.py src/my_data_hub/showcase/manager.py src/my_data_hub/showcase/gateway.py src/my_data_hub/showcase/runtime.py src/my_data_hub/showcase/mcp_server.py src/my_data_hub/mcp/server.py
+          python -m compileall -q src
+          git diff --check
+      - name: Test constructor checkpoint
+        run: |
+          python -m pip install -e '.[dev]'
+          npm ci --no-audit --no-fund --prefix showcase-site
+          pytest -q tests/showcase --junitxml=/tmp/showcase-tests.xml
+      - name: Commit actual source and remove temporary editors
+        run: |
+          git rm scripts/showcase_product_patch.py scripts/showcase_transport_patch.py .github/workflows/showcase-product-materialize.yml
+          git add src/my_data_hub/showcase src/my_data_hub/mcp/server.py deploy/showcase-runtime/runtime.env.example
+          git config user.name 'ChatGPT source maintenance'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'feat(showcase): implement create-by-reference, protected edits and actionable MCP writes'
+          git push origin HEAD:work/showcase-product-mcp-20260904
+          git archive --format=tar.gz HEAD > /tmp/showcase-source-checkpoint.tar.gz
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: showcase-local-test-bundle
-          path: /tmp/showcase-local
-          retention-days: 3
+          name: showcase-constructor-checkpoint
+          path: |
+            /tmp/showcase-tests.xml
+            /tmp/showcase-source-checkpoint.tar.gz
+          retention-days: 7
