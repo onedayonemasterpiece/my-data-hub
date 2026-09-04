@@ -255,11 +255,7 @@ def _catalog_tool_names(
 
     allowed = set(visible_tools(identity))
     if identity is not None and "provider:write" in identity.scopes:
-        allowed.update(
-            name
-            for name in _SHOWCASE_TOOL_NAMES
-            if TOOL_CONTRACTS[name].scope in configured_scopes
-        )
+        allowed.update(name for name in _SHOWCASE_TOOL_NAMES if TOOL_CONTRACTS[name].scope in configured_scopes)
     return frozenset(allowed & profile_tools)
 
 
@@ -418,8 +414,25 @@ def create_server(
     async def showcase_get_source(view_id: str) -> dict[str, Any] | list[Any]:
         return await asyncio.to_thread(showcase_manager().get_source, view_id)
 
-    async def showcase_apply(view_id: str, expected_source_revision: str, view: ShowcaseView | None, idempotency_key: str, items: list[ShowcaseItem] = [], dry_run: bool = True, publish: bool = False) -> dict[str, Any] | list[Any]:
-        return await asyncio.to_thread(showcase_manager().apply, view_id, expected_source_revision=expected_source_revision, view=view, items=items, dry_run=dry_run, publish=publish, idempotency_key=idempotency_key)
+    async def showcase_apply(
+        view_id: str,
+        expected_source_revision: str,
+        view: ShowcaseView | None,
+        idempotency_key: str,
+        items: list[ShowcaseItem] | None = None,
+        dry_run: bool = True,
+        publish: bool = False,
+    ) -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(
+            showcase_manager().apply,
+            view_id,
+            expected_source_revision=expected_source_revision,
+            view=view,
+            items=items or [],
+            dry_run=dry_run,
+            publish=publish,
+            idempotency_key=idempotency_key,
+        )
 
     async def showcase_rebuild(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
         return await asyncio.to_thread(

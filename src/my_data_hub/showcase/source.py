@@ -171,48 +171,78 @@ class GitHubShowcaseSource:
             items.append(item)
         return ShowcaseBundle(source_revision=revision, view=view, items=items)
 
-
     def get_source(self, view_id: str) -> ShowcaseBundle:
         return self.load_bundle(view_id)
 
 
 class GitHubShowcaseWriter:
     """Bounded GitHub Git-Data writer for only showcase views and items."""
-    def __init__(self, *, token: str, repository: str, ref: str = "main", root: str = "showcase", timeout_seconds: int = 20) -> None:
+
+    def __init__(
+        self, *, token: str, repository: str, ref: str = "main", root: str = "showcase", timeout_seconds: int = 20
+    ) -> None:
         if not token:
             raise ShowcaseSourceError("Showcase source write credential is unavailable")
-        self.token, self.repository, self.ref, self.root, self.timeout_seconds = token, repository, ref, root.strip("/"), timeout_seconds
+        self.token, self.repository, self.ref, self.root, self.timeout_seconds = (
+            token,
+            repository,
+            ref,
+            root.strip("/"),
+            timeout_seconds,
+        )
 
     def _request(self, url: str, *, method: str = "GET", payload: dict[str, object] | None = None) -> dict[str, object]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = Request(url, data=body, method=method, headers={"Accept":"application/vnd.github+json","Authorization":f"Bearer {self.token}","Content-Type":"application/json","User-Agent":"my-data-hub-ideahub-showcase/1","X-GitHub-Api-Version":"2022-11-28"})
+        request = Request(
+            url,
+            data=body,
+            method=method,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+                "User-Agent": "my-data-hub-ideahub-showcase/1",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response: result=json.load(response)
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                result = json.load(response)
         except HTTPError as exc:
             raise ShowcaseSourceError(f"GitHub source write returned HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             raise ShowcaseSourceError("GitHub source write request failed") from exc
-        if not isinstance(result, dict): raise ShowcaseSourceError("GitHub source write returned an unexpected response")
+        if not isinstance(result, dict):
+            raise ShowcaseSourceError("GitHub source write returned an unexpected response")
         return result
 
     def apply(self, *, expected_revision: str, files: dict[str, str], message: str) -> str:
-        base=f"https://api.github.com/repos/{self.repository}/git"
-        refdoc=self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
-        current=str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
-        if current != expected_revision: raise ShowcaseSourceError("source revision conflict")
-        commit=self._request(f"{base}/commits/{current}")
-        tree=str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
-        entries=[]
+        base = f"https://api.github.com/repos/{self.repository}/git"
+        refdoc = self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
+        current = str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
+        if current != expected_revision:
+            raise ShowcaseSourceError("source revision conflict")
+        commit = self._request(f"{base}/commits/{current}")
+        tree = str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
+        entries = []
         for relative, content in sorted(files.items()):
-            if not relative.startswith(("views/", "items/")) or "/" in relative.split("/", 1)[1] or not relative.endswith(".yaml"):
+            if (
+                not relative.startswith(("views/", "items/"))
+                or "/" in relative.split("/", 1)[1]
+                or not relative.endswith(".yaml")
+            ):
                 raise ShowcaseSourceError("unsafe showcase source path")
-            entries.append({"path":f"{self.root}/{relative}","mode":"100644","type":"blob","content":content})
-        newtree=self._request(f"{base}/trees", method="POST", payload={"base_tree":tree,"tree":entries})
-        tree_sha=str(newtree.get("sha", ""))
-        newcommit=self._request(f"{base}/commits", method="POST", payload={"message":message,"tree":tree_sha,"parents":[current]})
-        new_sha=str(newcommit.get("sha", ""))
+            entries.append({"path": f"{self.root}/{relative}", "mode": "100644", "type": "blob", "content": content})
+        newtree = self._request(f"{base}/trees", method="POST", payload={"base_tree": tree, "tree": entries})
+        tree_sha = str(newtree.get("sha", ""))
+        newcommit = self._request(
+            f"{base}/commits", method="POST", payload={"message": message, "tree": tree_sha, "parents": [current]}
+        )
+        new_sha = str(newcommit.get("sha", ""))
         # CAS update; GitHub rejects a non-fast-forward update.
-        self._request(f"{base}/refs/heads/{quote(self.ref, safe='')}", method="PATCH", payload={"sha":new_sha,"force":False})
+        self._request(
+            f"{base}/refs/heads/{quote(self.ref, safe='')}", method="PATCH", payload={"sha": new_sha, "force": False}
+        )
         return new_sha
 
     def create(self, *, view_id: str, files: dict[str, str], message: str) -> str:
@@ -225,7 +255,11 @@ class GitHubShowcaseWriter:
         commit = self._request(f"{base}/commits/{current}")
         tree = str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
         listing = self._request(f"{base}/trees/{quote(tree, safe='')}?recursive=1")
-        paths = {entry.get("path") for entry in listing.get("tree", []) if isinstance(entry, dict)} if isinstance(listing.get("tree"), list) else set()
+        paths = (
+            {entry.get("path") for entry in listing.get("tree", []) if isinstance(entry, dict)}
+            if isinstance(listing.get("tree"), list)
+            else set()
+        )
         target = f"{self.root}/views/{view_id}.yaml"
         if target in paths:
             raise ShowcaseSourceError("showcase view already exists")

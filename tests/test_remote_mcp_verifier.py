@@ -19,9 +19,10 @@ from scripts.verify_remote_mcp import (
 
 def test_verifier_reader_catalog_is_the_exact_runtime_read_tools() -> None:
     assert len(READ_ONLY_TOOLS) == 25
-    assert {
-        name for name, contract in TOOL_CONTRACTS.items() if contract.role == "reader"
-    } == READ_ONLY_TOOLS | {"showcase.list", "showcase.get_source"}
+    assert {name for name, contract in TOOL_CONTRACTS.items() if contract.role == "reader"} == READ_ONLY_TOOLS | {
+        "showcase.list",
+        "showcase.get_source",
+    }
 
 
 def test_remote_status_prefers_structured_result() -> None:
@@ -63,9 +64,7 @@ def test_remote_endpoint_rejects_any_noncanonical_token_audience(endpoint: str) 
 
 
 def test_remote_endpoint_accepts_only_the_canonical_resource() -> None:
-    assert _validate_endpoint("https://mcp-datahub.kenigevents.ru/mcp") == (
-        "https://mcp-datahub.kenigevents.ru/mcp"
-    )
+    assert _validate_endpoint("https://mcp-datahub.kenigevents.ru/mcp") == ("https://mcp-datahub.kenigevents.ru/mcp")
 
 
 def test_control_status_binds_exact_deployed_commit(tmp_path: Path) -> None:

@@ -53,8 +53,25 @@ def create_server(manager: ShowcaseManager | None = None):  # type: ignore[no-un
         return await asyncio.to_thread(control.get_source, view_id)
 
     @tool("showcase.apply", read_only=False, idempotent=True)
-    async def showcase_apply(view_id: str, expected_source_revision: str, view: ShowcaseView | None, idempotency_key: str, items: list[ShowcaseItem] = [], dry_run: bool = True, publish: bool = False) -> dict[str, Any]:
-        return await asyncio.to_thread(control.apply, view_id, expected_source_revision=expected_source_revision, view=view, items=items, dry_run=dry_run, publish=publish, idempotency_key=idempotency_key)
+    async def showcase_apply(
+        view_id: str,
+        expected_source_revision: str,
+        view: ShowcaseView | None,
+        idempotency_key: str,
+        items: list[ShowcaseItem] | None = None,
+        dry_run: bool = True,
+        publish: bool = False,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            control.apply,
+            view_id,
+            expected_source_revision=expected_source_revision,
+            view=view,
+            items=items or [],
+            dry_run=dry_run,
+            publish=publish,
+            idempotency_key=idempotency_key,
+        )
 
     @tool("showcase.rebuild", read_only=False, idempotent=True)
     async def showcase_rebuild(view_id: str, idempotency_key: str) -> dict[str, Any]:

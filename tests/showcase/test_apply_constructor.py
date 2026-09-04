@@ -54,10 +54,16 @@ def proposed_bundle() -> ShowcaseBundle:
     return ShowcaseBundle(source_revision="a" * 40, view=view, items=[item])
 
 
-def control(tmp_path: Path, source: MutableSource, writer: Writer, publisher: FakePublisher | None = None) -> ShowcaseManager:
+def control(
+    tmp_path: Path, source: MutableSource, writer: Writer, publisher: FakePublisher | None = None
+) -> ShowcaseManager:
     return ShowcaseManager(
-        source=source, state=ShowcaseStateStore(tmp_path / "state.json"),
-        builder=FakeBuilder(), publisher=publisher or FakePublisher(), origin="https://ideas.example", writer=writer  # type: ignore[arg-type]
+        source=source,
+        state=ShowcaseStateStore(tmp_path / "state.json"),
+        builder=FakeBuilder(),
+        publisher=publisher or FakePublisher(),
+        origin="https://ideas.example",
+        writer=writer,  # type: ignore[arg-type]
     )
 
 
@@ -66,7 +72,9 @@ def test_absent_dry_run_writes_no_source_or_registry(tmp_path: Path) -> None:
     bundle = proposed_bundle()
     source = MutableSource(existing)
     writer = Writer(source, bundle)
-    result = control(tmp_path, source, writer).apply("new-partner", expected_source_revision="absent", view=bundle.view, items=bundle.items)
+    result = control(tmp_path, source, writer).apply(
+        "new-partner", expected_source_revision="absent", view=bundle.view, items=bundle.items
+    )
     assert result["status"] == "dry_run"
     assert "new-partner" not in source.bundles
     assert not (tmp_path / "state.json").exists()
@@ -79,10 +87,19 @@ def test_absent_publish_creates_stable_link_and_update_preserves_it(tmp_path: Pa
     source = MutableSource(existing)
     writer = Writer(source, bundle)
     manager = control(tmp_path, source, writer)
-    created = manager.apply("new-partner", expected_source_revision="absent", view=bundle.view, items=bundle.items, dry_run=False, publish=True)
+    created = manager.apply(
+        "new-partner",
+        expected_source_revision="absent",
+        view=bundle.view,
+        items=bundle.items,
+        dry_run=False,
+        publish=True,
+    )
     assert created["status"] == "published"
     link = manager.get_link("new-partner")["url"]
-    updated = manager.apply("new-partner", expected_source_revision=REVISION, view=None, items=[], dry_run=False, publish=True)
+    updated = manager.apply(
+        "new-partner", expected_source_revision=REVISION, view=None, items=[], dry_run=False, publish=True
+    )
     assert updated["status"] == "published"
     assert manager.get_link("new-partner")["url"] == link
 
@@ -106,10 +123,19 @@ def test_publish_failure_is_explicit_and_rebuild_recovers(tmp_path: Path) -> Non
     writer = Writer(source, bundle)
     publisher = FakePublisher()
     manager = control(tmp_path, source, writer, publisher)
+
     def fail_rebuild(*args: object, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("publisher unavailable")
+
     manager.rebuild = fail_rebuild  # type: ignore[method-assign]
-    result = manager.apply("new-partner", expected_source_revision="absent", view=bundle.view, items=bundle.items, dry_run=False, publish=True)
+    result = manager.apply(
+        "new-partner",
+        expected_source_revision="absent",
+        view=bundle.view,
+        items=bundle.items,
+        dry_run=False,
+        publish=True,
+    )
     assert result["status"] == "applied_not_published"
     assert result["new_source_revision"] == REVISION
     manager.rebuild = ShowcaseManager.rebuild.__get__(manager)  # type: ignore[method-assign]

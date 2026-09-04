@@ -410,7 +410,9 @@ class ShowcaseOperationController:
             operation_key = _operation_key(tool, view_id, idempotency_key)
             journal = self.journal.load()
             completed = journal.get("completed", {}).get(operation_key)
-            fingerprint = hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            fingerprint = hashlib.sha256(
+                json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
             if isinstance(completed, Mapping) and isinstance(completed.get("result"), (dict, list)):
                 if completed.get("fingerprint") not in {None, fingerprint}:
                     raise ShowcaseRuntimeConflictError("idempotency key was previously used with different payload")
@@ -424,7 +426,17 @@ class ShowcaseOperationController:
                 )
             else:
                 if tool == "showcase.apply":
-                    result = _call_method(self.manager, "apply", view_id, expected_source_revision=arguments.get("expected_source_revision"), view=arguments.get("view"), items=arguments.get("items", []), dry_run=arguments.get("dry_run", True), publish=arguments.get("publish", False), idempotency_key=idempotency_key)
+                    result = _call_method(
+                        self.manager,
+                        "apply",
+                        view_id,
+                        expected_source_revision=arguments.get("expected_source_revision"),
+                        view=arguments.get("view"),
+                        items=arguments.get("items", []),
+                        dry_run=arguments.get("dry_run", True),
+                        publish=arguments.get("publish", False),
+                        idempotency_key=idempotency_key,
+                    )
                     if not isinstance(result, (dict, list)):
                         raise ShowcaseRuntimeError("showcase manager returned an invalid result")
                     self.journal.remember(journal, operation_key, result, fingerprint)

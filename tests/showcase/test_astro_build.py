@@ -1,8 +1,8 @@
 import json
-from pathlib import Path
 import re
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -74,14 +74,24 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
           addEventListener: (event, fn) => listeners.set(`${{name}}:${{event}}`, fn),
         }}));
         const cards = [
-          {{ dataset: {{ audience: 'guides', category: 'voice', maturity: 'prototype', effort: 'medium', search: 'клонирование голоса аудиогиды' }}, hidden: false }},
-          {{ dataset: {{ audience: 'business', category: 'business', maturity: 'designed', effort: 'high', search: 'персональный помощник аналитика' }}, hidden: false }},
-          {{ dataset: {{ audience: 'media', category: 'content', maturity: 'idea', effort: 'medium', search: 'короткие видео' }}, hidden: false }},
+          {{ dataset: {{
+            audience: 'guides', category: 'voice', maturity: 'prototype', effort: 'medium',
+            search: 'клонирование голоса аудиогиды',
+          }}, hidden: false }},
+          {{ dataset: {{
+            audience: 'business', category: 'business', maturity: 'designed', effort: 'high',
+            search: 'персональный помощник аналитика',
+          }}, hidden: false }},
+          {{ dataset: {{
+            audience: 'media', category: 'content', maturity: 'idea', effort: 'medium', search: 'короткие видео',
+          }}, hidden: false }},
         ];
         const count = {{ textContent: '3 возможностей' }};
         const empty = {{ hidden: true }};
         global.document = {{
-          querySelector: (selector) => selector === '#showcase-search' ? search : selector === '#showcase-result-count' ? count : empty,
+          querySelector: (selector) =>
+            selector === '#showcase-search' ? search :
+            selector === '#showcase-result-count' ? count : empty,
           querySelectorAll: (selector) => selector === '[data-showcase-filter]' ? filters : cards,
         }};
         vm.runInThisContext(fs.readFileSync({json.dumps(str(asset))}, 'utf8'));
@@ -106,6 +116,7 @@ def test_showcase_asset_filters_category_readiness_and_search() -> None:
         "readiness": {"count": "1 возможность", "visible": 1},
         "searchResult": {"count": "1 возможность", "visible": 1},
     }
+
 
 def test_share_controls_and_static_svg_routes_exist() -> None:
     index = (SITE / "src/pages/index.astro").read_text(encoding="utf-8")

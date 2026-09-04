@@ -9,9 +9,17 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from .builder import AstroShowcaseBuilder
-from .models import RegistryState, SurfaceState, ShowcaseItem, ShowcaseView
+from .models import RegistryState, ShowcaseItem, ShowcaseView, SurfaceState
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
-from .source import FilesystemShowcaseSource, GitHubShowcaseSource, GitHubShowcaseWriter, GitSshShowcaseSource, ShowcaseSource, ShowcaseSourceError, ShowcaseSourceNotFoundError
+from .source import (
+    FilesystemShowcaseSource,
+    GitHubShowcaseSource,
+    GitHubShowcaseWriter,
+    GitSshShowcaseSource,
+    ShowcaseSource,
+    ShowcaseSourceError,
+    ShowcaseSourceNotFoundError,
+)
 from .state import ShowcaseStateStore
 
 
@@ -133,7 +141,6 @@ class ShowcaseManager:
             "last_build": surface.last_build.model_dump(mode="json") if surface.last_build else None,
         }
 
-
     def get_source(self, view_id: str) -> dict[str, Any]:
         bundle = self.source.get_source(view_id)
         return {
@@ -185,6 +192,7 @@ class ShowcaseManager:
         if missing:
             raise ShowcaseSourceError("view references items not included in the proposed bundle")
         from .models import ShowcaseBundle
+
         bundle = ShowcaseBundle(
             source_revision=("create-preview" if creating else current.source_revision),
             view=proposed_view,
@@ -194,9 +202,13 @@ class ShowcaseManager:
             raise ShowcaseSourceError("new partner view items require capability_type")
         changed: dict[str, str] = {}
         if view is not None:
-            changed[f"views/{view_id}.yaml"] = __import__("yaml").safe_dump(view.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
+            changed[f"views/{view_id}.yaml"] = __import__("yaml").safe_dump(
+                view.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False
+            )
         for item in items:
-            changed[f"items/{item.id}.yaml"] = __import__("yaml").safe_dump(item.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False)
+            changed[f"items/{item.id}.yaml"] = __import__("yaml").safe_dump(
+                item.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False
+            )
         result: dict[str, Any] = {
             "schema_version": 1,
             "status": "dry_run" if dry_run else "applied",
@@ -205,7 +217,10 @@ class ShowcaseManager:
             "changed_paths": sorted(changed),
             "view_count": 1,
             "item_count": len(bundle.items),
-            "validation": {"valid": True, "buildable": (getattr(self.builder, "site_root", Path("/nonexistent")) / "package.json").is_file()},
+            "validation": {
+                "valid": True,
+                "buildable": (getattr(self.builder, "site_root", Path("/nonexistent")) / "package.json").is_file(),
+            },
         }
         if dry_run:
             return result
@@ -217,7 +232,9 @@ class ShowcaseManager:
                 raise ShowcaseSourceError("Showcase source writer does not support CAS-create")
             new_revision = create(view_id=view_id, files=changed, message=f"showcase: create {view_id}")
         else:
-            new_revision = self.writer.apply(expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}")
+            new_revision = self.writer.apply(
+                expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}"
+            )
         readback = self.source.get_source(view_id)
         if readback.source_revision != new_revision:
             raise ShowcaseSourceError("source readback did not resolve the committed revision")
@@ -226,7 +243,9 @@ class ShowcaseManager:
             try:
                 published = self.rebuild(view_id, idempotency_key=idempotency_key)
             except Exception:
-                result.update({"status": "applied_not_published", "publish_failure": "publication failed; retry showcase.rebuild"})
+                result.update(
+                    {"status": "applied_not_published", "publish_failure": "publication failed; retry showcase.rebuild"}
+                )
                 return result
             result.update({"status": "published", "publish": published})
         return result
