@@ -33,9 +33,7 @@ _SINGLETON_HEADERS = frozenset(
         "x-forwarded-proto",
     }
 )
-_FORWARDED_HEADERS = frozenset(
-    {"forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
-)
+_FORWARDED_HEADERS = frozenset({"forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"})
 _SECURITY_RESPONSE_HEADERS = (
     (b"cache-control", b"no-store"),
     (b"pragma", b"no-cache"),
@@ -115,9 +113,7 @@ class SlidingWindowRateLimiter:
             queue.append(now)
             if len(self._events) > self.max_keys:
                 stale = sorted(
-                    (last[-1] if last else float("-inf"), name)
-                    for name, last in self._events.items()
-                    if name != key
+                    (last[-1] if last else float("-inf"), name) for name, last in self._events.items() if name != key
                 )
                 for _, name in stale[: len(self._events) - self.max_keys]:
                     self._events.pop(name, None)
@@ -317,11 +313,7 @@ class HTTPAdmissionSecurity:
             raise AdmissionError(400, "invalid_host") from exc
         if not any(
             parsed_host[0] == allowed[0]
-            and (
-                parsed_host[1] == allowed[1]
-                if allowed[1] is not None
-                else parsed_host[1] in {None, 443}
-            )
+            and (parsed_host[1] == allowed[1] if allowed[1] is not None else parsed_host[1] in {None, 443})
             for allowed in self.allowed_hosts
         ):
             raise AdmissionError(403, "host_not_allowed")
@@ -440,10 +432,7 @@ class HTTPAdmissionSecurity:
                     raise AdmissionError(400, "query_bearer_forbidden")
             authorization = headers.get("authorization", [""])[0]
             identity: AccessIdentity | None = None
-            public_metadata = (
-                scope.get("method") == "GET"
-                and scope.get("path") in self.unauthenticated_paths
-            )
+            public_metadata = scope.get("method") == "GET" and scope.get("path") in self.unauthenticated_paths
             if self.authenticator is not None and not public_metadata:
                 if not authorization:
                     raise AdmissionError(401, "authentication_required", authenticate=True)
@@ -480,8 +469,30 @@ class HTTPAdmissionSecurity:
             except TimeoutError as exc:
                 raise AdmissionError(503, "server_busy") from exc
             try:
-                async with asyncio.timeout(self.limits.request_timeout_seconds):
+                async with asyncio.timeout(self.limits.request_timeout_seconds) as deadline:
                     body = await self._read_body(receive, headers.get("content-length", [None])[0])
+                    # Only authorized Showcase source/build calls get a longer budget.
+                    # Upload/authentication and unrelated requests keep their limits.
+                    if identity is not None and scope.get("method") == "POST":
+                        try:
+                            document = json.loads(body)
+                            name = document.get("params", {}).get("name")
+                            required = "showcase:read" if name == "showcase.get_source" else "showcase:write"
+                            if (
+                                document.get("method") == "tools/call"
+                                and name
+                                in {
+                                    "showcase.apply",
+                                    "showcase.create_view",
+                                    "showcase.rebuild",
+                                    "showcase.rotate_link",
+                                    "showcase.get_source",
+                                }
+                                and required in identity.scopes
+                            ):
+                                deadline.reschedule(asyncio.get_running_loop().time() + 300)
+                        except (ValueError, TypeError, AttributeError):
+                            pass
                     state = dict(scope.get("state") or {})
                     state.update(
                         {
@@ -511,9 +522,7 @@ class HTTPAdmissionSecurity:
                 correlation_id,
                 authenticate=exc.authenticate,
                 retry_after=exc.status in {429, 503},
-                resource_metadata_url=(
-                    self.resource_metadata_url if exc.authenticate else None
-                ),
+                resource_metadata_url=(self.resource_metadata_url if exc.authenticate else None),
             )
         except Exception:
             # Never expose application, adapter, or ASGI protocol exception text.
@@ -536,9 +545,7 @@ class HTTPAdmissionSecurity:
         headers.append((b"x-correlation-id", correlation_id.encode("ascii")))
         return headers
 
-    async def _send_buffered(
-        self, send: ASGISend, messages: list[dict[str, Any]], correlation_id: str
-    ) -> None:
+    async def _send_buffered(self, send: ASGISend, messages: list[dict[str, Any]], correlation_id: str) -> None:
         for message in messages:
             if message["type"] == "http.response.start":
                 message["headers"] = self._secure_headers(message.get("headers", ()), correlation_id)
