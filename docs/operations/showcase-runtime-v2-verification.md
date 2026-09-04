@@ -13,8 +13,8 @@ Accepted runtime identity:
 - deployed `my-data-hub` commit: `bb9b2cdd317d1fc7162505abaf02c3b8de8fa278`;
 - control image: `sha256:af7cac55eb0b82fe6590a388c201080e3c7395506026e690bcb4089dd20b020f`;
 - Showcase image: `sha256:d7ce1e8b0c863e4854dee24db15292369e0a292210ec225409a0a2ae146b0066`;
-- final IdeaHub source/readback revision after cleanup:
-  `9ec74fbb0d2b601722074746dfb1a34883fe74b0`;
+- final IdeaHub source/readback revision after cleanup and continuation:
+  `cd6ec63f34fa05449ee53b1eb181c28c87d9ce06`;
 - final tree hash: `dc546771f5532e893ef751cd4a12933340bc8f0450ef60da6d35ff68b37eae26`;
 - build: 71 files, including 33 HTML files.
 

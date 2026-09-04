@@ -17,6 +17,11 @@
       "status": "PASS",
       "view_id": "acceptance-devcoveer-20260904t175724z"
     },
+    "final_ideahub_continuation": {
+      "commit": "cd6ec63f34fa05449ee53b1eb181c28c87d9ce06",
+      "path": "continuations/ideahub-showcase/codex-live-closure-final-20260904.md",
+      "status": "PASS"
+    },
     "main_content_cycle": {
       "build": {
         "file_count": 71,
@@ -84,7 +89,7 @@
         "file_count": 71,
         "html_count": 33,
         "slug_sha256": "9af7fd2f00989271e53d47a84fcb43a1b75a7ebcd20322e21554c588c1015641",
-        "source_revision": "9ec74fbb0d2b601722074746dfb1a34883fe74b0",
+        "source_revision": "cd6ec63f34fa05449ee53b1eb181c28c87d9ce06",
         "tree_sha256": "dc546771f5532e893ef751cd4a12933340bc8f0450ef60da6d35ff68b37eae26",
         "url_masked": "https://ideas.kenigevents.ru/v/bnNk…gCud/"
       },
@@ -92,7 +97,7 @@
       "create_view_idempotent": false,
       "create_view_invoked": true,
       "rebuild_invoked": true,
-      "source_revision": "9ec74fbb0d2b601722074746dfb1a34883fe74b0",
+      "source_revision": "cd6ec63f34fa05449ee53b1eb181c28c87d9ce06",
       "stable_url": true,
       "status": "PASS"
     },
