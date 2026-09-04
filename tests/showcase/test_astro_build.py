@@ -129,7 +129,13 @@ def test_share_controls_and_static_svg_routes_exist() -> None:
     share = (SITE / "src/scripts/showcase-share.js").read_text(encoding="utf-8")
     assert "ShareButton" in index and "ShareButton" in detail
     assert 'data-showcase-filter="capabilityType"' in index
-    for label in ("\u0412\u0441\u0435 \u0442\u0438\u043f\u044b \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0435\u0439", "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0430\u044f", "\u041f\u0440\u043e\u0434\u0443\u043a\u0442\u043e\u0432\u0430\u044f", "\u0411\u0438\u0437\u043d\u0435\u0441"):
+    labels = (
+        "\u0412\u0441\u0435 \u0442\u0438\u043f\u044b \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0435\u0439",
+        "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0430\u044f",
+        "\u041f\u0440\u043e\u0434\u0443\u043a\u0442\u043e\u0432\u0430\u044f",
+        "\u0411\u0438\u0437\u043d\u0435\u0441",
+    )
+    for label in labels:
         assert label in index
     assert "navigator.share" in share and "navigator.canShare" in share and "clipboard" in share
     assert (SITE / "src/pages/share/idea-hub.svg.ts").is_file()
