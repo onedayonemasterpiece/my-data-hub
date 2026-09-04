@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 
 from my_data_hub.auth.context import current_identity
 from my_data_hub.mcp.oauth import AccessIdentity
+
+from .requests import ShowcaseMode, safe_problem
 
 SHOWCASE_GATEWAY_PATH = "/internal/mcp-showcase/invoke"
 SHOWCASE_TOOLS = frozenset(
@@ -46,7 +49,7 @@ class ShowcaseGatewayError(RuntimeError):
 class ShowcaseGatewaySettings:
     url: str
     token_file: Path
-    timeout_seconds: float = 45.0
+    timeout_seconds: float = 240.0
 
     @classmethod
     def from_env(cls) -> ShowcaseGatewaySettings:
@@ -56,13 +59,13 @@ class ShowcaseGatewaySettings:
             raise ShowcaseGatewayError("MY_DATA_HUB_SHOWCASE_GATEWAY_URL is required")
         if not raw_token_file:
             raise ShowcaseGatewayError("MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE is required")
-        timeout_raw = os.getenv("MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS", "45")
+        timeout_raw = os.getenv("MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS", "240")
         try:
             timeout = float(timeout_raw)
         except ValueError as exc:
             raise ShowcaseGatewayError("MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS must be numeric") from exc
-        if not 1 <= timeout <= 180:
-            raise ShowcaseGatewayError("showcase gateway timeout must be 1..180 seconds")
+        if not 1 <= timeout <= 300:
+            raise ShowcaseGatewayError("showcase gateway timeout must be 1..300 seconds")
         settings = cls(
             url=_validate_gateway_url(raw_url),
             token_file=Path(raw_token_file).expanduser().resolve(),
@@ -201,6 +204,9 @@ class ShowcaseGatewayClient:
         except ValueError as exc:
             raise ShowcaseGatewayError("showcase runtime returned invalid JSON") from exc
         if response.status_code >= 400 or not isinstance(document, dict):
+            problem = safe_problem(document.get("error")) if isinstance(document, dict) else None
+            if problem is not None:
+                raise ShowcaseGatewayError(json.dumps(problem, ensure_ascii=False))
             code = document.get("code") if isinstance(document, dict) else None
             suffix = f" ({code})" if isinstance(code, str) and code else ""
             raise ShowcaseGatewayError(f"showcase runtime rejected the request{suffix}")
@@ -223,11 +229,12 @@ class ShowcaseGatewayClient:
         view_id: str,
         *,
         expected_source_revision: str,
-        view: dict[str, Any] | None,
-        items: list[dict[str, Any]],
-        dry_run: bool = True,
-        publish: bool = False,
-        idempotency_key: str,
+        view: dict[str, Any] | None = None,
+        items: list[dict[str, Any]] | None = None,
+        dry_run: bool | None = None,
+        publish: bool | None = None,
+        mode: ShowcaseMode | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any] | list[Any]:
         return self._invoke(
             "showcase.apply",
@@ -235,9 +242,10 @@ class ShowcaseGatewayClient:
                 "view_id": view_id,
                 "expected_source_revision": expected_source_revision,
                 "view": view,
-                "items": items,
+                "items": items or [],
                 "dry_run": dry_run,
                 "publish": publish,
+                "mode": mode,
                 "idempotency_key": idempotency_key,
             },
         )
@@ -268,11 +276,24 @@ class ShowcaseGatewayClient:
         self,
         view_id: str,
         *,
-        idempotency_key: str,
+        view: dict[str, Any] | None = None,
+        items: list[dict[str, Any]] | None = None,
+        mode: ShowcaseMode | None = None,
+        dry_run: bool | None = None,
+        publish: bool | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any] | list[Any]:
         return self._invoke(
             "showcase.create_view",
-            {"view_id": view_id, "idempotency_key": idempotency_key},
+            {
+                "view_id": view_id,
+                "view": view,
+                "items": items or [],
+                "mode": mode,
+                "dry_run": dry_run,
+                "publish": publish,
+                "idempotency_key": idempotency_key,
+            },
         )
 
     def revoke_link(

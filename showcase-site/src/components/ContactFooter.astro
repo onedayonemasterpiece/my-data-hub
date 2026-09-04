@@ -1,0 +1,29 @@
+---
+import { loadShowcase } from '../lib/showcase-data.mjs';
+import { cardPath } from '../lib/presentation.mjs';
+const { view, items } = loadShowcase();
+const contacts = view.contacts?.length ? view.contacts : [view.contact];
+// Old manifests sometimes put an entire instruction in contact.value. Display the
+// actual Telegram address instead; never invent a contact or route its destination.
+const displayValue = (contact) => {
+  const match = /^https:\/\/t\.me\/([A-Za-z0-9_]+)\/?$/u.exec(contact.href);
+  return match ? `@${match[1]}` : contact.value;
+};
+---
+<footer class="contact-card" aria-label="Контакты">
+  <h2>Обсудим вашу задачу</h2>
+  <p>Начнём с одного сценария и примера результата на ваших материалах.</p>
+  <div class="contact-links">
+    {contacts.map((contact) => <a href={contact.href} rel="noreferrer">{contact.label === 'Следующий шаг' ? 'Telegram' : contact.label} · {displayValue(contact)}</a>)}
+  </div>
+  <details class="interest-message" data-interest-message hidden>
+    <summary>Обсудить выбранное <span data-interest-count></span></summary>
+    <p>Отметки сохранены только в этом браузере. Сообщение не отправляется автоматически.</p>
+    <textarea readonly aria-label="Сообщение о выбранных сценариях" data-interest-text></textarea>
+    <button type="button" data-interest-copy>Скопировать сообщение</button>
+    <span role="status" data-interest-status></span>
+  </details>
+  <nav hidden data-interest-catalog aria-hidden="true">
+    {items.map((item, index) => <a data-item-id={item.id} data-item-number={item.display_number || index + 1} href={cardPath(item.id)}>{item.title}</a>)}
+  </nav>
+</footer>

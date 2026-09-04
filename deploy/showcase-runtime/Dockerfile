@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MY_DATA_HUB_ARTIFACT_ROOT=/var/lib/my-data-hub-showcase
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node

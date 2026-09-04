@@ -5,10 +5,15 @@ on:
     paths:
       - "showcase-site/**"
       - "src/my_data_hub/showcase/**"
+      - "src/my_data_hub/mcp/server.py"
+      - "src/my_data_hub/mcp/admission.py"
+      - "deploy/showcase-runtime/**"
       - "tests/showcase/**"
       - "docs/ideahub-showcase.md"
       - "pyproject.toml"
       - ".github/workflows/ideahub-showcase.yml"
+  pull_request:
+    paths: ["showcase-site/**", "src/my_data_hub/showcase/**", "src/my_data_hub/mcp/**", "tests/showcase/**", "deploy/showcase-runtime/**"]
   workflow_dispatch:
 
 permissions:
@@ -30,14 +35,16 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Install Astro renderer
         working-directory: showcase-site
+        run: npm ci --no-audit --no-fund
+      - name: Install Chromium test runtime
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
-      - name: Run showcase tests
-        run: pytest -q tests/showcase
+          python -m pip install playwright==1.57.0
+          python -m playwright install --with-deps chromium
+      - name: Run Showcase contract and browser tests
+        env:
+          SHOWCASE_BROWSER: '1'
+          SHOWCASE_SCREENSHOTS: ${{ runner.temp }}/showcase-screenshots
+        run: pytest -q tests/showcase --junitxml="${RUNNER_TEMP}/showcase-tests.xml"
       - name: Build and publish local smoke surface through the control layer
         env:
           MY_DATA_HUB_SHOWCASE_SOURCE_ROOT: ${{ github.workspace }}/tests/showcase/fixtures
@@ -63,12 +70,15 @@ jobs:
           assert (root / "showcase-headers.json").is_file()
           PY
       - name: Upload reproducibility evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ideahub-showcase-smoke
           if-no-files-found: error
           path: |
             showcase-site/package-lock.json
+            ${{ runner.temp }}/showcase-tests.xml
+            ${{ runner.temp }}/showcase-screenshots
             ${{ runner.temp }}/showcase-result.json
             ${{ runner.temp }}/showcase/state.json
             ${{ runner.temp }}/showcase/public

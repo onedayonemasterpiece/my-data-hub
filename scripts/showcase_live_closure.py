@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Bounded live acceptance for IdeaHub Showcase.
 
-The script never prints or persists complete secret Showcase URLs. It temporarily
-changes one presentation string on the existing main surface, restores the exact
-source bundle, and uses a disposable view for rotation/revocation checks.
+Only disposable source is changed. Main is read/previewed, never rewritten or
+rotated. Full secret URLs stay out of receipts and console output; the existing
+main link is written only to the explicitly configured private 0600 file.
 """
 
 from __future__ import annotations
@@ -12,7 +12,9 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -53,7 +55,9 @@ def safe_failure(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup):
         leaves = [safe_failure(child) for child in exc.exceptions]
         return f"{type(exc).__name__}[{';'.join(leaves)}]"[:400]
-    return f"{type(exc).__name__}:{exc}"[:400]
+    if isinstance(exc, LiveClosureError) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", str(exc)):
+        return f"LiveClosureError:{exc}"
+    return type(exc).__name__
 
 
 def require(condition: bool, code: str) -> None:
@@ -180,7 +184,11 @@ async def visible_card_count(page: Page) -> int:
     )
 
 
-async def exercise_filter(page: Page, key: str, selector: str, total: int) -> int:
+async def exercise_filter(page: Page, key: str, selector: str, total: int) -> int | None:
+    # The renderer omits irrelevant/internal filters; absence is not a defect.
+    if await page.locator(selector).count() == 0:
+        return None
+    await page.locator("#showcase-search").focus()
     values = await page.locator("[data-showcase-card]").evaluate_all(
         "(nodes, key) => nodes.map(node => node.dataset[key] || '')",
         key,
@@ -247,7 +255,7 @@ async def browser_acceptance(url: str) -> dict[str, Any]:
         overflow = await page.evaluate("document.documentElement.scrollWidth > window.innerWidth")
         require(not overflow, "BROWSER_HORIZONTAL_OVERFLOW")
         lefts = await page.locator("[data-showcase-card]").evaluate_all(
-            "nodes => [...new Set(nodes.filter(n => !n.hidden).map(n => Math.round(n.getBoundingClientRect().left)))]"
+            "nodes => [...new Set(nodes.filter(n => !n.hidden).map(n => Math.round(n.getBoundingClientRect().left))) ]"
         )
         require(len(lefts) == 1, "BROWSER_NOT_ONE_COLUMN")
 
@@ -278,6 +286,8 @@ async def browser_acceptance(url: str) -> dict[str, Any]:
         await page.locator("#showcase-search").fill("")
         await page.wait_for_timeout(100)
 
+        detail_href = await page.locator(".idea-card__link").first.get_attribute("href")
+        require(bool(detail_href), "BROWSER_DETAIL_LINK_MISSING")
         share_controls = await page.locator("[data-share]").count()
         require(share_controls >= total + 1, "BROWSER_INDEX_SHARING_INCOMPLETE")
         await page.locator("[data-share-button]").first.click()
@@ -287,7 +297,7 @@ async def browser_acceptance(url: str) -> dict[str, Any]:
             isinstance(payload, dict)
             and bool(payload.get("title"))
             and bool(payload.get("text"))
-            and bool(payload.get("url")),
+            and payload.get("url") == resolve_page_url(url, detail_href),
             "BROWSER_WEB_SHARE_PAYLOAD_INVALID",
         )
         require(
@@ -354,10 +364,102 @@ def build_evidence(link: dict[str, Any], url: str) -> dict[str, Any]:
     }
 
 
+async def exercise_disposable(
+    session: ClientSession, source: dict[str, Any], run_id: str, checks: dict[str, Any]
+) -> None:
+    """Live writes are restricted to this disposable view; existing cards are reused read-only."""
+    view_id = f"acceptance-{run_id}".lower()
+    definitions = select_disposable_items(source["items"], view_id)[1:]
+    view = {
+        "title": "Временная проверка IdeaHub Showcase",
+        "subtitle": "Проверка создания по ссылкам на карточки, правок и жизненного цикла ссылки.",
+        "item_ids": [source["items"][0]["id"], definitions[0]["id"]],
+        "contact": deepcopy(source["view"]["contact"]),
+    }
+    evidence: dict[str, Any] = {
+        "status": "FAIL",
+        "view_id": view_id,
+        "revoked": False,
+        "write_attempted": False,
+        "source_cleanup_paths": [
+            f"showcase/views/{view_id}.yaml",
+            *[f"showcase/items/{item['id']}.yaml" for item in definitions],
+        ],
+    }
+    checks["disposable_lifecycle"] = evidence
+    arguments = {"view_id": view_id, "view": view, "items": definitions}
+    preview = await invoke(session, "showcase.create_view", {**arguments, "mode": "preview"})
+    require(preview.get("status") == "dry_run", "DISPOSABLE_PREVIEW_FAILED")
+    require(preview.get("validation", {}).get("build_checked") is False, "PREVIEW_BUILD_CLAIM_INVALID")
+    require(preview.get("validation", {}).get("buildable") is None, "PREVIEW_BUILDABILITY_CLAIM_INVALID")
+    write = {**arguments, "mode": "publish", "idempotency_key": f"closure:{run_id}:create"}
+    # A lost response may still have applied a write. Do not report clean before checking.
+    evidence["write_attempted"] = True
+    created = await invoke(session, "showcase.create_view", write)
+    require(created.get("status") in {"published", "applied_not_published"}, "DISPOSABLE_CREATE_FAILED")
+    if created.get("status") == "applied_not_published":
+        await invoke(session, "showcase.rebuild", {"view_id": view_id, "idempotency_key": f"closure:{run_id}:rebuild"})
+    link = await invoke(session, "showcase.get_link", {"view_id": view_id})
+    url = link.get("url")
+    require(isinstance(url, str), "DISPOSABLE_LINK_MISSING")
+    duplicate = await invoke(session, "showcase.create_view", write)
+    require(duplicate.get("duplicate") is True, "CREATE_RETRY_NOT_IDEMPOTENT")
+    same_link = await invoke(session, "showcase.get_link", {"view_id": view_id})
+    require(same_link.get("url") == url, "CREATE_RETRY_CHANGED_URL")
+    current = await invoke(session, "showcase.get_source", {"view_id": view_id})
+    updated_view = {**current["view"], "subtitle": f"Проверенная правка · {run_id}"}
+    changed = await invoke(
+        session,
+        "showcase.apply",
+        {
+            "view_id": view_id,
+            "expected_source_revision": current["source_revision"],
+            "view": updated_view,
+            "mode": "publish",
+            "idempotency_key": f"closure:{run_id}:update",
+        },
+    )
+    require(changed.get("status") == "published", "DISPOSABLE_UPDATE_NOT_PUBLISHED")
+    updated_link = await invoke(session, "showcase.get_link", {"view_id": view_id})
+    require(updated_link.get("url") == url, "UPDATE_CHANGED_URL")
+    readback = await invoke(session, "showcase.get_source", {"view_id": view_id})
+    require(readback["view"]["subtitle"] == updated_view["subtitle"], "DISPOSABLE_UPDATE_READBACK_FAILED")
+    status, headers, html = await public_response(url)
+    require(status == 200 and run_id in html, "DISPOSABLE_UPDATE_NOT_VISIBLE")
+    evidence["security"] = verify_security_headers(headers, html)
+    evidence.update(
+        stable_update_url=True,
+        duplicate_create=True,
+        reuse_and_new_card=True,
+        source_revision=readback["source_revision"],
+        build=build_evidence(updated_link, url),
+    )
+    rotation = {"view_id": view_id, "idempotency_key": f"closure:{run_id}:rotate"}
+    rotated = await invoke(session, "showcase.rotate_link", rotation)
+    rotated_url = rotated.get("url")
+    require(isinstance(rotated_url, str) and rotated_url != url, "DISPOSABLE_ROTATION_FAILED")
+    new_status, _, _ = await public_response(rotated_url)
+    old_status, _, _ = await public_response(url)
+    require(new_status == 200 and old_status >= 400, "ROTATED_LINK_STATE_INVALID")
+    await invoke(session, "showcase.rotate_link", rotation)
+    repeated = await invoke(session, "showcase.get_link", {"view_id": view_id})
+    require(repeated.get("url") == rotated_url, "ROTATION_RETRY_CHANGED_URL")
+    await invoke(session, "showcase.revoke_link", {"view_id": view_id, "idempotency_key": f"closure:{run_id}:revoke"})
+    revoked_status, _, _ = await public_response(rotated_url)
+    require(revoked_status >= 400, "REVOKED_URL_STILL_AVAILABLE")
+    evidence.update(
+        status="PASS",
+        revoked=True,
+        duplicate_rotation=True,
+        old_status_after_rotation=old_status,
+        revoked_status=revoked_status,
+    )
+
+
 async def run() -> int:
     artifact = Path(os.environ.get("SHOWCASE_LIVE_RECEIPT", "artifacts/showcase-live-closure.json"))
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    run_id = os.environ.get("SHOWCASE_LIVE_RUN_ID", "local")
+    run_id = os.environ.get("SHOWCASE_LIVE_RUN_ID", datetime.now(UTC).strftime("%Y%m%d%H%M%S")).lower()
     endpoint = os.environ.get("MY_DATA_HUB_MCP_CANARY_ENDPOINT", "").strip()
     credential_path = Path(os.environ.get("MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE", "").strip())
     private_link_path = Path(os.environ.get("SHOWCASE_MAIN_LINK_FILE", "").strip())
@@ -365,322 +467,99 @@ async def run() -> int:
         "schema_version": 1,
         "status": "FAIL",
         "run_id": run_id,
-        "endpoint": endpoint,
         "deployed_commit": os.environ.get("MY_DATA_HUB_DEPLOY_COMMIT", "unknown"),
         "control_image_id": os.environ.get("SHOWCASE_CONTROL_IMAGE_ID", "unknown"),
         "showcase_image_id": os.environ.get("SHOWCASE_RUNTIME_IMAGE_ID", "unknown"),
         "checks": {},
     }
-    original_source: dict[str, Any] | None = None
     main_url: str | None = None
-    disposable_view_id = f"acceptance-{run_id}".lower()
-    disposable_active = False
-    failure: str | None = None
-
     try:
+        require(bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,34}", run_id)), "RUN_ID_INVALID")
         require(endpoint == "https://mcp-datahub.kenigevents.ru/mcp", "MCP_ENDPOINT_INVALID")
         require(credential_path.is_absolute() and credential_path.is_file(), "MCP_CREDENTIAL_FILE_MISSING")
-        require(private_link_path.is_absolute(), "PRIVATE_LINK_PATH_INVALID")
+        require(private_link_path.is_absolute() and not private_link_path.is_symlink(), "PRIVATE_LINK_PATH_INVALID")
         token = await RotatingOAuthBearerSource(credential_path).token("operator")
         async with (
             httpx2.AsyncClient(
                 headers={"Authorization": f"Bearer {token}"},
                 follow_redirects=False,
-                timeout=httpx2.Timeout(240.0, connect=10.0),
+                timeout=httpx2.Timeout(300.0, connect=10.0),
             ) as client,
             streamable_http_client(endpoint, http_client=client) as streams,
         ):
             read_stream, write_stream = streams
-            async with ClientSession(read_stream, write_stream, read_timeout_seconds=240) as session:
+            async with ClientSession(read_stream, write_stream, read_timeout_seconds=300) as session:
                 await session.initialize()
                 listed = await session.list_tools()
-                names = sorted(tool.name for tool in listed.tools)
-                require(EXPECTED_SHOWCASE_TOOLS.issubset(set(names)), "MCP_EIGHT_TOOLS_NOT_DISCOVERED")
-                receipt["checks"]["tool_discovery"] = {
-                    "status": "PASS",
-                    "showcase_tools": sorted(EXPECTED_SHOWCASE_TOOLS),
-                    "total_tools": len(names),
-                }
-
+                tools = {tool.name: tool for tool in listed.tools if tool.name.startswith("showcase.")}
+                require(set(tools) == EXPECTED_SHOWCASE_TOOLS, "MCP_EIGHT_TOOLS_NOT_DISCOVERED")
+                schema = tools["showcase.create_view"].input_schema
+                require(
+                    "mode" in schema.get("properties", {}) and "view" in schema.get("properties", {}),
+                    "MCP_CREATE_SCHEMA_STALE",
+                )
+                receipt["checks"]["tool_discovery"] = {"status": "PASS", "showcase_tools": sorted(tools)}
                 surfaces = await invoke(session, "showcase.list", {})
-                original_source = await invoke(session, "showcase.get_source", {"view_id": "main"})
-                link_before = await invoke(session, "showcase.get_link", {"view_id": "main"})
-                main_url = link_before.get("url")
+                source = await invoke(session, "showcase.get_source", {"view_id": "main"})
+                link = await invoke(session, "showcase.get_link", {"view_id": "main"})
+                main_url = link.get("url")
                 require(isinstance(main_url, str) and main_url.startswith("https://"), "MAIN_LINK_MISSING")
-                slug = slug_from_url(main_url)
-                require(slug not in canonical_bytes(surfaces).decode("utf-8"), "LIST_LEAKS_FULL_SECRET_SLUG")
-                require(isinstance(original_source.get("view"), dict), "MAIN_SOURCE_VIEW_MISSING")
-                require(isinstance(original_source.get("items"), list), "MAIN_SOURCE_ITEMS_MISSING")
-                original_hash = sha256_json(
-                    {"view": original_source["view"], "items": original_source["items"]}
+                require(
+                    slug_from_url(main_url) not in canonical_bytes(surfaces).decode(), "LIST_LEAKS_FULL_SECRET_SLUG"
                 )
-                source_revision = original_source.get("source_revision")
-                require(isinstance(source_revision, str) and len(source_revision) >= 8, "MAIN_SOURCE_REVISION_MISSING")
-
-                marker = f"проверка-{run_id[-8:]}"
-                changed_view = deepcopy(original_source["view"])
-                base_access = str(changed_view.get("access_label", "Доступ по секретной ссылке"))
-                changed_view["access_label"] = f"{base_access[:70]} · {marker}"
-                dry_key = f"closure:{run_id}:main:dry"
-                dry = await invoke(
+                original_hash = sha256_json({"view": source["view"], "items": source["items"]})
+                preview = await invoke(
                     session,
                     "showcase.apply",
                     {
                         "view_id": "main",
-                        "expected_source_revision": source_revision,
-                        "view": changed_view,
-                        "items": [],
-                        "dry_run": True,
-                        "publish": False,
-                        "idempotency_key": dry_key,
+                        "expected_source_revision": source["source_revision"],
+                        "view": source["view"],
+                        "mode": "preview",
                     },
                 )
-                require(dry.get("status") == "dry_run", "MAIN_DRY_RUN_FAILED")
-                after_dry = await invoke(session, "showcase.get_source", {"view_id": "main"})
-                require(after_dry.get("source_revision") == source_revision, "MAIN_DRY_RUN_MUTATED_SOURCE")
+                require(preview.get("status") == "dry_run", "MAIN_PREVIEW_FAILED")
+                after_preview = await invoke(session, "showcase.get_source", {"view_id": "main"})
+                require(after_preview["source_revision"] == source["source_revision"], "MAIN_PREVIEW_CHANGED_REVISION")
+                await exercise_disposable(session, source, run_id, receipt["checks"])
+                after = await invoke(session, "showcase.get_source", {"view_id": "main"})
+                final_link = await invoke(session, "showcase.get_link", {"view_id": "main"})
                 require(
-                    sha256_json({"view": after_dry["view"], "items": after_dry["items"]}) == original_hash,
-                    "MAIN_DRY_RUN_CHANGED_BUNDLE",
+                    sha256_json({"view": after["view"], "items": after["items"]}) == original_hash,
+                    "MAIN_CONTENT_CHANGED",
                 )
-
-                apply_key = f"closure:{run_id}:main:apply"
-                applied = await invoke(
-                    session,
-                    "showcase.apply",
-                    {
-                        "view_id": "main",
-                        "expected_source_revision": source_revision,
-                        "view": changed_view,
-                        "items": [],
-                        "dry_run": False,
-                        "publish": True,
-                        "idempotency_key": apply_key,
-                    },
-                )
-                require(applied.get("status") in {"published", "applied_not_published"}, "MAIN_APPLY_FAILED")
-                if applied.get("status") == "applied_not_published":
-                    await invoke(
-                        session,
-                        "showcase.rebuild",
-                        {"view_id": "main", "idempotency_key": f"closure:{run_id}:main:rebuild"},
-                    )
-                changed_source = await invoke(session, "showcase.get_source", {"view_id": "main"})
-                require(
-                    changed_source["view"].get("access_label", "").endswith(marker),
-                    "MAIN_SOURCE_CHANGE_NOT_VISIBLE",
-                )
-                link_changed = await invoke(session, "showcase.get_link", {"view_id": "main"})
-                require(link_changed.get("url") == main_url, "MAIN_LINK_CHANGED_ON_UPDATE")
+                require(final_link.get("url") == main_url, "MAIN_LINK_CHANGED")
                 status, headers, html = await public_response(main_url)
-                require(status == 200 and marker in html, "MAIN_PUBLIC_CHANGE_NOT_VISIBLE")
-                security = verify_security_headers(headers, html)
-
-                rollback_key = f"closure:{run_id}:main:rollback"
-                rolled_back = await invoke(
-                    session,
-                    "showcase.apply",
-                    {
-                        "view_id": "main",
-                        "expected_source_revision": changed_source["source_revision"],
-                        "view": original_source["view"],
-                        "items": [],
-                        "dry_run": False,
-                        "publish": True,
-                        "idempotency_key": rollback_key,
-                    },
-                )
-                require(
-                    rolled_back.get("status") in {"published", "applied_not_published"},
-                    "MAIN_ROLLBACK_APPLY_FAILED",
-                )
-                if rolled_back.get("status") == "applied_not_published":
-                    await invoke(
-                        session,
-                        "showcase.rebuild",
-                        {"view_id": "main", "idempotency_key": f"closure:{run_id}:main:rollback-rebuild"},
-                    )
-                restored = await invoke(session, "showcase.get_source", {"view_id": "main"})
-                restored_hash = sha256_json({"view": restored["view"], "items": restored["items"]})
-                require(restored_hash == original_hash, "MAIN_ROLLBACK_BUNDLE_MISMATCH")
-                link_restored = await invoke(session, "showcase.get_link", {"view_id": "main"})
-                require(link_restored.get("url") == main_url, "MAIN_LINK_CHANGED_AFTER_ROLLBACK")
-                restored_status, restored_headers, restored_html = await public_response(main_url)
-                require(restored_status == 200 and marker not in restored_html, "MAIN_PUBLIC_ROLLBACK_FAILED")
-                verify_security_headers(restored_headers, restored_html)
-                receipt["checks"]["main_content_cycle"] = {
+                require(status == 200, "MAIN_NOT_200")
+                receipt["checks"]["main_read_only"] = {
                     "status": "PASS",
-                    "dry_run_no_mutation": True,
-                    "source_change_and_readback": True,
+                    "bundle_sha256": original_hash,
                     "stable_url": True,
-                    "rollback_exact_bundle": True,
-                    "initial_bundle_sha256": original_hash,
-                    "restored_bundle_sha256": restored_hash,
-                    "restored_source_revision": restored["source_revision"],
-                    "security": security,
-                    "build": build_evidence(link_restored, main_url),
+                    "preview_no_mutation": True,
+                    "security": verify_security_headers(headers, html),
+                    "build": build_evidence(final_link, main_url),
                 }
-
-                disposable_items = select_disposable_items(original_source["items"], disposable_view_id)
-                disposable_view = {
-                    "schema_version": 1,
-                    "id": disposable_view_id,
-                    "title": "Временная проверка IdeaHub Showcase",
-                    "subtitle": "Одноразовая поверхность для проверки создания, ротации и отзыва ссылки.",
-                    "access_label": "Временная секретная ссылка",
-                    "visibility_ceiling": "partner",
-                    "item_ids": [item["id"] for item in disposable_items],
-                    "contact": deepcopy(original_source["view"]["contact"]),
-                }
-                disposable_dry = await invoke(
-                    session,
-                    "showcase.apply",
-                    {
-                        "view_id": disposable_view_id,
-                        "expected_source_revision": "absent",
-                        "view": disposable_view,
-                        "items": disposable_items,
-                        "dry_run": True,
-                        "publish": False,
-                        "idempotency_key": f"closure:{run_id}:disposable:dry",
-                    },
-                )
-                require(disposable_dry.get("status") == "dry_run", "DISPOSABLE_DRY_RUN_FAILED")
-                disposable_apply = await invoke(
-                    session,
-                    "showcase.apply",
-                    {
-                        "view_id": disposable_view_id,
-                        "expected_source_revision": "absent",
-                        "view": disposable_view,
-                        "items": disposable_items,
-                        "dry_run": False,
-                        "publish": True,
-                        "idempotency_key": f"closure:{run_id}:disposable:create",
-                    },
-                )
-                require(
-                    disposable_apply.get("status") in {"published", "applied_not_published"},
-                    "DISPOSABLE_CREATE_FAILED",
-                )
-                if disposable_apply.get("status") == "applied_not_published":
-                    await invoke(
-                        session,
-                        "showcase.rebuild",
-                        {
-                            "view_id": disposable_view_id,
-                            "idempotency_key": f"closure:{run_id}:disposable:rebuild",
-                        },
-                    )
-                disposable_active = True
-                disposable_source = await invoke(
-                    session,
-                    "showcase.get_source",
-                    {"view_id": disposable_view_id},
-                )
-                disposable_link = await invoke(
-                    session,
-                    "showcase.get_link",
-                    {"view_id": disposable_view_id},
-                )
-                disposable_url = disposable_link.get("url")
-                require(isinstance(disposable_url, str), "DISPOSABLE_LINK_MISSING")
-                disposable_status, _, _ = await public_response(disposable_url)
-                require(disposable_status == 200, "DISPOSABLE_PUBLIC_NOT_200")
-
-                rotated = await invoke(
-                    session,
-                    "showcase.rotate_link",
-                    {
-                        "view_id": disposable_view_id,
-                        "idempotency_key": f"closure:{run_id}:disposable:rotate",
-                    },
-                )
-                rotated_url = rotated.get("url")
-                require(isinstance(rotated_url, str) and rotated_url != disposable_url, "DISPOSABLE_ROTATION_FAILED")
-                rotated_status, _, _ = await public_response(rotated_url)
-                old_status, _, _ = await public_response(disposable_url)
-                require(rotated_status == 200, "DISPOSABLE_ROTATED_URL_NOT_200")
-                require(old_status >= 400, "DISPOSABLE_OLD_URL_STILL_AVAILABLE")
-                await invoke(
-                    session,
-                    "showcase.rotate_link",
-                    {
-                        "view_id": disposable_view_id,
-                        "idempotency_key": f"closure:{run_id}:disposable:rotate",
-                    },
-                )
-                duplicate_link = await invoke(
-                    session,
-                    "showcase.get_link",
-                    {"view_id": disposable_view_id},
-                )
-                require(duplicate_link.get("url") == rotated_url, "DISPOSABLE_ROTATION_NOT_IDEMPOTENT")
-                await invoke(
-                    session,
-                    "showcase.revoke_link",
-                    {
-                        "view_id": disposable_view_id,
-                        "idempotency_key": f"closure:{run_id}:disposable:revoke",
-                    },
-                )
-                disposable_active = False
-                revoked_status, _, _ = await public_response(rotated_url)
-                require(revoked_status >= 400, "DISPOSABLE_REVOKED_URL_STILL_AVAILABLE")
-                receipt["checks"]["disposable_lifecycle"] = {
-                    "status": "PASS",
-                    "view_id": disposable_view_id,
-                    "source_revision": disposable_source["source_revision"],
-                    "created_url_masked": mask_url(disposable_url),
-                    "created_slug_sha256": hashlib.sha256(slug_from_url(disposable_url).encode()).hexdigest(),
-                    "rotated_url_masked": mask_url(rotated_url),
-                    "rotated_slug_sha256": hashlib.sha256(slug_from_url(rotated_url).encode()).hexdigest(),
-                    "old_status_after_rotation": old_status,
-                    "revoked_status": revoked_status,
-                    "duplicate_rotation_created_no_third_url": True,
-                    "source_cleanup_paths": [
-                        f"showcase/views/{disposable_view_id}.yaml",
-                        *[
-                            f"showcase/items/{item['id']}.yaml"
-                            for item in disposable_items
-                        ],
-                    ],
-                }
-
         require(main_url is not None, "MAIN_URL_UNAVAILABLE_FOR_BROWSER")
-        receipt["checks"]["mobile_browser"] = {
-            "status": "PASS",
-            **await browser_acceptance(main_url),
-        }
-        descriptor = os.open(private_link_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        receipt["checks"]["mobile_browser"] = {"status": "PASS", **await browser_acceptance(main_url)}
+        descriptor = os.open(private_link_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(main_url + "\n")
-        os.chmod(private_link_path, 0o600)
         receipt["status"] = "PASS"
-    except Exception as exc:  # fail closed; full URLs and raw tool payloads stay out of the receipt
-        failure = safe_failure(exc)
-        receipt["failure"] = failure
+    except Exception as exc:
+        receipt["failure"] = safe_failure(exc)
     finally:
-        # The normal path performs exact rollback and revocation inside the live session.
-        # If transport failed mid-operation, record that manual recovery is required rather
-        # than emitting secret state or pretending closure succeeded.
+        lifecycle = receipt["checks"].get("disposable_lifecycle", {})
         receipt["cleanup"] = {
-            "main_rollback_completed": receipt.get("checks", {})
-            .get("main_content_cycle", {})
-            .get("rollback_exact_bundle")
-            is True,
-            "disposable_revoked": not disposable_active,
-            "source_cleanup_required": [
-                f"showcase/views/{disposable_view_id}.yaml",
-                f"showcase/items/{disposable_view_id}-item-1.yaml",
-                f"showcase/items/{disposable_view_id}-item-2.yaml",
-            ]
-            if "disposable_lifecycle" in receipt.get("checks", {})
-            else None,
+            "main_source_writes": False,
+            "disposable_revoked": lifecycle.get("revoked") is True,
+            "manual_recovery_required": lifecycle.get("write_attempted") is True
+            and lifecycle.get("revoked") is not True,
+            "source_cleanup_required": lifecycle.get("source_cleanup_paths")
+            if lifecycle.get("write_attempted")
+            else [],
         }
-        artifact.write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        artifact.write_text(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0 if receipt["status"] == "PASS" else 1
 
 

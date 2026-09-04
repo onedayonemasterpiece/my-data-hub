@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import inspect
 import os
 import secrets
 import threading
+from contextlib import nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+import yaml
+
 from .builder import AstroShowcaseBuilder
-from .models import RegistryState, ShowcaseItem, ShowcaseView, SurfaceState
+from .models import RegistryState, ShowcaseBundle, ShowcaseItem, ShowcaseView, SurfaceState
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
+from .requests import ShowcaseMode, ShowcaseRequestError, resolve_mode
 from .source import (
     FilesystemShowcaseSource,
     GitHubShowcaseSource,
@@ -165,99 +170,171 @@ class ShowcaseManager:
         view_id: str,
         *,
         expected_source_revision: str,
-        view: ShowcaseView | None,
-        items: list[ShowcaseItem],
-        dry_run: bool = True,
-        publish: bool = False,
+        view: ShowcaseView | None = None,
+        items: list[ShowcaseItem] | None = None,
+        dry_run: bool | None = None,
+        publish: bool | None = None,
+        mode: ShowcaseMode | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Validate, CAS-write, and optionally publish a bounded Showcase bundle."""
+        """CAS-update or legacy CAS-create. New clients create via create_view."""
+        selected = resolve_mode(mode, dry_run, publish)
         if not expected_source_revision:
-            raise ShowcaseSourceError("expected_source_revision is required")
-        if isinstance(view, dict):
-            view = ShowcaseView.model_validate(view)
-        items = [ShowcaseItem.model_validate(item) if isinstance(item, dict) else item for item in items]
+            raise ShowcaseRequestError("REVISION_REQUIRED", "expected_source_revision")
         creating = expected_source_revision == "absent"
-        try:
-            current = self.source.get_source(view_id)
-        except ShowcaseSourceNotFoundError:
-            if not creating:
-                raise
-            current = None
-        if creating and current is not None:
-            raise ShowcaseSourceError("showcase view already exists")
-        if not creating and current is None:
-            raise ShowcaseSourceError("showcase source is absent")
-        if not creating and current.source_revision != expected_source_revision:
-            raise ShowcaseSourceError("source revision conflict")
-        if view is not None and view.id != view_id:
-            raise ShowcaseSourceError("view id mismatch")
-        if creating and view is None:
-            raise ShowcaseSourceError("CAS-create requires a complete view")
-        proposed_view = view if view is not None else current.view
-        by_id = {} if creating else {item.id: item for item in current.items}
-        for item in items:
-            by_id[item.id] = item
-        missing = [item_id for item_id in proposed_view.item_ids if item_id not in by_id]
-        if missing:
-            raise ShowcaseSourceError("view references items not included in the proposed bundle")
-        from .models import ShowcaseBundle
-
-        bundle = ShowcaseBundle(
-            source_revision=("create-preview" if creating else current.source_revision),
-            view=proposed_view,
-            items=[by_id[item_id] for item_id in proposed_view.item_ids],
-        )
-        if creating and any(item.capability_type is None for item in bundle.items):
-            raise ShowcaseSourceError("new partner view items require capability_type")
-        changed: dict[str, str] = {}
-        if view is not None:
-            changed[f"views/{view_id}.yaml"] = __import__("yaml").safe_dump(
-                view.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False
-            )
-        for item in items:
-            changed[f"items/{item.id}.yaml"] = __import__("yaml").safe_dump(
-                item.model_dump(mode="json", exclude_none=True), allow_unicode=True, sort_keys=False
-            )
-        result: dict[str, Any] = {
-            "schema_version": 1,
-            "status": "dry_run" if dry_run else "applied",
-            "previous_source_revision": "absent" if creating else current.source_revision,
-            "new_source_revision": "absent" if dry_run and creating else (current.source_revision if dry_run else None),
-            "changed_paths": sorted(changed),
-            "view_count": 1,
-            "item_count": len(bundle.items),
-            "validation": {
-                "valid": True,
-                "buildable": (getattr(self.builder, "site_root", Path("/nonexistent")) / "package.json").is_file(),
-            },
-        }
-        if dry_run:
-            return result
-        if self.writer is None:
-            raise ShowcaseSourceError("Showcase source write credential is unavailable")
-        if creating:
-            create = getattr(self.writer, "create", None)
-            if not callable(create):
-                raise ShowcaseSourceError("Showcase source writer does not support CAS-create")
-            new_revision = create(view_id=view_id, files=changed, message=f"showcase: create {view_id}")
-        else:
-            new_revision = self.writer.apply(
-                expected_revision=current.source_revision, files=changed, message=f"showcase: update {view_id}"
-            )
-        readback = self.source.get_source(view_id)
-        if readback.source_revision != new_revision:
-            raise ShowcaseSourceError("source readback did not resolve the committed revision")
-        result["new_source_revision"] = new_revision
-        if publish:
+        snapshot_method = getattr(self.source, "snapshot", None)
+        context = snapshot_method() if callable(snapshot_method) else nullcontext(None)
+        with self._lock, context as snapshot:
+            if snapshot is not None and creating and snapshot.view_exists(view_id):
+                raise ShowcaseRequestError("VIEW_EXISTS", "view_id")
             try:
-                published = self.rebuild(view_id, idempotency_key=idempotency_key)
+                current = snapshot.get_source(view_id) if snapshot is not None else self.source.get_source(view_id)
+            except ShowcaseSourceNotFoundError:
+                current = None
+            if creating and current is not None:
+                raise ShowcaseRequestError("VIEW_EXISTS", "view_id")
+            if not creating and current is None:
+                raise ShowcaseRequestError("VIEW_NOT_FOUND", "view_id")
+            if current is not None and current.source_revision != expected_source_revision:
+                raise ShowcaseRequestError("REVISION_CONFLICT", "expected_source_revision")
+            if creating and view is None:
+                raise ShowcaseRequestError("VIEW_REQUIRED", "view")
+            if view is not None:
+                raw_view = view.model_dump(mode="json") if hasattr(view, "model_dump") else dict(view)
+                if raw_view.get("id") not in {None, view_id}:
+                    raise ShowcaseRequestError("VIEW_ID_MISMATCH", "view.id")
+                raw_view["id"] = view_id
+                proposed_view = ShowcaseView.model_validate(raw_view)
+            else:
+                proposed_view = current.view
+            definitions = [
+                ShowcaseItem.model_validate(item.model_dump() if hasattr(item, "model_dump") else item)
+                for item in (items or [])
+            ]
+            if len({item.id for item in definitions}) != len(definitions):
+                raise ShowcaseRequestError("DUPLICATE_ITEM", "items")
+            by_id = {} if creating else {item.id: item for item in current.items}
+            changed: dict[str, str] = {}
+            for index, item in enumerate(definitions):
+                if item.id not in proposed_view.item_ids:
+                    raise ShowcaseRequestError("UNREFERENCED_ITEM", f"items[{index}].id")
+                old = by_id.get(item.id)
+                if snapshot is not None:
+                    try:
+                        old = snapshot.get_item(item.id)
+                    except ShowcaseSourceNotFoundError:
+                        old = None
+                if old != item:
+                    if old is not None and creating:
+                        raise ShowcaseRequestError("ITEM_ID_CONFLICT", f"items[{index}].id")
+                    if old is not None and snapshot is not None and any(v != view_id for v in snapshot.users(item.id)):
+                        raise ShowcaseRequestError("SHARED_ITEM", f"items[{index}].id")
+                    if item.capability_type is None:
+                        raise ShowcaseRequestError("CAPABILITY_TYPE_REQUIRED", f"items[{index}].capability_type")
+                    changed[f"items/{item.id}.yaml"] = yaml.safe_dump(
+                        item.model_dump(mode="json", exclude_none=True),
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                by_id[item.id] = item
+            for index, item_id in enumerate(proposed_view.item_ids):
+                if item_id not in by_id and snapshot is not None:
+                    with suppress(ShowcaseSourceNotFoundError):
+                        by_id[item_id] = snapshot.get_item(item_id)
+                if item_id not in by_id:
+                    raise ShowcaseRequestError("ITEM_NOT_FOUND", f"view.item_ids[{index}]")
+            ordered = [by_id[item_id] for item_id in proposed_view.item_ids]
+            bundle = ShowcaseBundle.model_validate(
+                {
+                    "source_revision": "create-preview" if creating else current.source_revision,
+                    "view": proposed_view,
+                    "items": ordered,
+                },
+                context={"allow_drafts": True},
+            )
+            publication_errors = []
+            for index, item in enumerate(ordered):
+                if item.publish_state != "ready":
+                    publication_errors.append(ShowcaseRequestError("ITEM_NOT_READY", f"view.item_ids[{index}]"))
+                if proposed_view.visibility_ceiling == "public" and item.visibility == "partner":
+                    publication_errors.append(ShowcaseRequestError("VISIBILITY_EXCEEDED", f"view.item_ids[{index}]"))
+            if selected == "publish" and publication_errors:
+                raise publication_errors[0]
+            if creating or proposed_view != current.view:
+                changed[f"views/{view_id}.yaml"] = yaml.safe_dump(
+                    proposed_view.model_dump(mode="json", exclude_none=True),
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+            result: dict[str, Any] = {
+                "schema_version": 1,
+                "view_id": view_id,
+                "mode": selected,
+                "status": "dry_run" if selected == "preview" else "applied",
+                "previous_source_revision": "absent" if creating else current.source_revision,
+                "new_source_revision": "absent" if creating else current.source_revision,
+                "changed_paths": sorted(changed),
+                "view_count": 1,
+                "item_count": len(bundle.items),
+                "validation": {
+                    "valid": True,
+                    "publication_ready": not publication_errors,
+                    "buildable": None,
+                    "build_checked": False,
+                    "errors": [error.payload() for error in publication_errors],
+                },
+                "warnings": (
+                    ["Reused legacy cards without capability_type; no global cards were changed."]
+                    if any(item.capability_type is None for item in ordered)
+                    else []
+                ),
+            }
+            if selected == "preview":
+                return result
+            new_revision = current.source_revision if current is not None else None
+            if changed:
+                if self.writer is None:
+                    raise ShowcaseRequestError("WRITE_UNAVAILABLE")
+                if creating:
+                    create = getattr(self.writer, "create", None)
+                    if not callable(create):
+                        raise ShowcaseRequestError("WRITE_UNAVAILABLE")
+                    kwargs = {"view_id": view_id, "files": changed, "message": f"showcase: create {view_id}"}
+                    if snapshot is not None and "expected_revision" in inspect.signature(create).parameters:
+                        kwargs["expected_revision"] = snapshot.revision
+                    new_revision = create(**kwargs)
+                else:
+                    new_revision = self.writer.apply(
+                        expected_revision=current.source_revision,
+                        files=changed,
+                        message=f"showcase: update {view_id}",
+                    )
+            result["new_source_revision"] = new_revision
+        # The immutable source snapshot is no longer needed while building.
+        try:
+            kwargs = (
+                {"revision": new_revision} if "revision" in inspect.signature(self.source.get_source).parameters else {}
+            )
+            readback = self.source.get_source(view_id, **kwargs)
+            if readback.source_revision != new_revision or readback.view != proposed_view or readback.items != ordered:
+                raise ShowcaseSourceError("exact source readback mismatch")
+        except Exception:
+            result.update(status="applied_not_verified", error=ShowcaseRequestError("READBACK_FAILED").payload())
+            return result
+        if selected == "publish":
+            try:
+                published = self.rebuild(
+                    view_id, idempotency_key=idempotency_key, expected_source_revision=new_revision
+                )
             except Exception:
                 result.update(
-                    {"status": "applied_not_published", "publish_failure": "publication failed; retry showcase.rebuild"}
+                    status="applied_not_published",
+                    error=ShowcaseRequestError("PUBLICATION_FAILED").payload(),
+                    publish_failure="publication failed; retry showcase.rebuild",
                 )
                 return result
-            result.update({"status": "published", "publish": published})
+            result.update(status="published", publish=published, url=published["url"])
+            result["validation"].update(buildable=True, build_checked=True)
         return result
 
     def list_surfaces(self) -> dict[str, Any]:
@@ -295,9 +372,19 @@ class ShowcaseManager:
             raise RuntimeError(f"showcase surface {view_id} is revoked; rotate or create it explicitly")
         return surface
 
-    def rebuild(self, view_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
+    def rebuild(
+        self, view_id: str, *, idempotency_key: str | None = None, expected_source_revision: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
-            bundle = self.source.load_bundle(view_id)
+            kwargs = (
+                {"revision": expected_source_revision}
+                if expected_source_revision is not None
+                and "revision" in inspect.signature(self.source.load_bundle).parameters
+                else {}
+            )
+            bundle = self.source.load_bundle(view_id, **kwargs)
+            if expected_source_revision is not None and bundle.source_revision != expected_source_revision:
+                raise ShowcaseRequestError("REVISION_CONFLICT")
             with self.state.transaction() as state:
                 surface = self._ensure_surface(state, view_id)
                 slug = surface.slug
@@ -324,9 +411,26 @@ class ShowcaseManager:
         self,
         view_id: str,
         *,
-        publish: bool = True,
+        publish: bool | None = None,
         idempotency_key: str | None = None,
+        view: ShowcaseView | None = None,
+        items: list[ShowcaseItem] | None = None,
+        mode: ShowcaseMode | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
+        if view is not None:
+            selected = resolve_mode(mode, dry_run, publish)
+            return self.apply(
+                view_id,
+                expected_source_revision="absent",
+                view=view,
+                items=items or [],
+                mode=selected,
+                idempotency_key=idempotency_key,
+            )
+        if mode is not None or dry_run is not None or items:
+            raise ShowcaseRequestError("VIEW_REQUIRED", "view")
+        publish = True if publish is None else publish
         with self._lock:
             self.source.load_bundle(view_id)
             with self.state.transaction() as state:

@@ -1,5 +1,7 @@
 import { loadShowcase } from '../../lib/showcase-data.mjs';
+import { shareSvg } from '../../lib/share-image.mjs';
 export const prerender = true;
-const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-export function getStaticPaths() { return loadShowcase().items.map((item) => ({ params: { id: item.id }, props: { title: item.title, summary: item.summary } })); }
-export function GET({ props }) { const { title, summary } = props; return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#102a43"/><text x="80" y="130" fill="#7fdbca" font-size="34" font-family="sans-serif">IdeaHub Showcase</text><text x="80" y="265" fill="white" font-size="58" font-family="sans-serif" font-weight="700">${escape(title).slice(0,70)}</text><text x="80" y="350" fill="#d7e3f4" font-size="30" font-family="sans-serif">${escape(summary).slice(0,110)}</text><text x="80" y="550" fill="#7fdbca" font-size="28" font-family="sans-serif">ideas.kenigevents.ru</text></svg>`, { headers: { 'Content-Type': 'image/svg+xml' } }); }
+export function getStaticPaths() { return loadShowcase().items.map((item) => ({ params: { id: item.id }, props: { item } })); }
+export function GET({ props }) {
+  return new Response(shareSvg(props.item.title, props.item.summary), { headers: { 'Content-Type': 'image/svg+xml' } });
+}

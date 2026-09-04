@@ -1,14 +1,13 @@
-
 # IdeaHub Showcase: production runtime
 
 ## Evidence status
 
-This document specifies the deployment boundary; it does not prove a deployment. On
-2026-09-04, live ChatGPT `showcase.list` returned `503 OAuth token request failed` and
-its discovered surface showed only six older methods. Source code, an image build, or
-compose configuration is not live acceptance. Do not claim the service ready until the
-receipts in [showcase-runtime-v2-verification.md](showcase-runtime-v2-verification.md)
-are complete for the deployed exact main successor.
+This document specifies deployment, not proof of a particular deployment. The earlier
+2026-09-04 live acceptance is recorded in
+[showcase-runtime-v2-verification.md](showcase-runtime-v2-verification.md).
+The product/MCP changes in PR #38 require a new coordinated release and live smoke;
+old receipts do not certify the new client schema, PNG renderer or runtime settings.
+Follow [the bounded release handoff](../handoffs/showcase-product-mcp-deploy-20260904.md).
 
 The runtime image installs the HTTP client used by the gateway, and the read-only
 static edge writes all Nginx temporary files only to its private `/tmp` tmpfs.
@@ -79,22 +78,32 @@ MY_DATA_HUB_SHOWCASE_PUBLIC_DIR=/srv/my-data-hub/showcase/public
 MY_DATA_HUB_SHOWCASE_STATE_DIR=/srv/my-data-hub/showcase/state
 MY_DATA_HUB_SHOWCASE_RUNTIME_ENV_FILE=/srv/my-data-hub/showcase/runtime.env
 MY_DATA_HUB_SHOWCASE_RUNTIME_PORT=8790
-MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS=180
+MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS=240
 MY_DATA_HUB_SHOWCASE_IMAGE=my-data-hub-showcase:local
 MY_DATA_HUB_SHOWCASE_MEMORY_LIMIT=512m
 MY_DATA_HUB_SHOWCASE_CPU_LIMIT=1.00
 MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE=<existing-owner-scopes>,showcase:read,showcase:write
 ```
 
-Keep the edge-to-runtime timeout at `180` seconds: a cold Astro build and Git
-source round-trip can exceed the gateway library's generic 45-second default.
-The outer MCP client/read timeout used for operator publication must be at least
-as long. A client timeout does not prove that the source write or build stopped;
-always read the source and link back before retrying or rolling back.
+Set the actual runtime env `MY_DATA_HUB_SHOWCASE_MAX_REQUEST_BYTES=262144` and the
+actual edge env `MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS=240`. Old explicit
+values (65536/45/180) override new defaults and must be inspected, not assumed updated.
+Arguments remain capped at 128 KiB UTF-8 inside the 256 KiB authenticated envelope.
+Authorized Showcase source/build calls get a scoped 300-second MCP admission budget;
+unrelated calls keep their existing limit. Align the outer proxy/operator client budget
+with it. A client timeout does not prove that the source write or build stopped: always
+read source/link and reuse the original idempotency key for an identical retry.
+
+Deploy the edge and isolated runtime from the same tested revision. The new edge forwards
+`mode`, so running it against an old runtime is not an accepted mixed-version state.
+The runtime image includes pinned Sharp and DejaVu fonts for static PNGs. Build the actual
+container and exercise a representative catalog under its memory/CPU limits; unconstrained
+CI builds do not prove a 512 MiB production memory budget. No font files go into public
+source or downloadable receipts.
 
 The OAuth owner/operator client receives `showcase:read` and
 `showcase:write`. A reader explicitly granted `showcase:read` may call
-only `showcase.list`, which returns masked URLs.
+`showcase.list` (masked URLs) and `showcase.get_source` (curated source, including drafts).
 `showcase.get_link` returns the full secret URL and therefore requires
 owner/operator scope `showcase:write`, despite being annotated as a
 read-only operation.
@@ -118,8 +127,12 @@ more and verify `showcase.get_source` and `showcase.apply` alongside the existin
 ## Build and start
 
 ```bash
-docker compose               -f compose.control-plane.yaml               -f compose.showcase.yaml               --env-file /srv/my-data-hub/control-plane.env               build showcase-runtime
-docker compose               -f compose.control-plane.yaml               -f compose.showcase.yaml               --env-file /srv/my-data-hub/control-plane.env               up -d showcase-runtime showcase-static remote-mcp
+docker compose \
+  -f compose.control-plane.yaml -f compose.showcase.yaml \
+  --env-file /srv/my-data-hub/control-plane.env build showcase-runtime
+docker compose \
+  -f compose.control-plane.yaml -f compose.showcase.yaml \
+  --env-file /srv/my-data-hub/control-plane.env up -d showcase-runtime showcase-static remote-mcp
 curl --fail --silent http://127.0.0.1:8790/health/ready
 curl --fail --silent http://127.0.0.1:8791/healthz
 ```
@@ -143,13 +156,26 @@ scopes, OAuth token issuance succeeds, and `tools/list` exposes all eight tools:
 `revoke_link`. Then execute remote `get_source` and `apply`; schema registration alone
 is insufficient.
 
-Run the complete A–H content-only checklist in
-[showcase-runtime-v2-verification.md](showcase-runtime-v2-verification.md). In
-particular, use `apply(dry_run=true)` for no-mutation validation, retain exact
-source/public-page/link readbacks, and keep the existing URL for ordinary updates.
-Create a disposable view via create-aware `apply(..., expected_source_revision=absent)`
-and clean it up with `revoke_link`; do not rotate a partner link to demonstrate the
-constructor.
+Use the current [constructor contract](../ideahub-showcase.md) and the existing
+`scripts/showcase_live_closure.py`. The runner leaves main content/link unchanged,
+previews main, then creates one disposable view with an existing card ID and one new
+card definition through `create_view(mode=preview|publish)`. It verifies duplicate create,
+CAS update with a stable URL, rotation retry and revocation. It also checks public security
+headers and the mobile browser. Hidden irrelevant filters are allowed; rendered filters
+must work. Native share payload is tested, not delivery to a real messaging app.
+
+The runner creates source and links on production and therefore requires the owner's
+explicit integration/live acceptance task. It is not an ordinary unit test. Its required
+env is `MY_DATA_HUB_MCP_CANARY_ENDPOINT`, `MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE`,
+`SHOWCASE_MAIN_LINK_FILE` (absolute private 0600 output), plus the release image/commit
+metadata and a safe optional `SHOWCASE_LIVE_RUN_ID`. Do not print the credentials or full
+URLs. Keep the sanitized receipt under `SHOWCASE_LIVE_RECEIPT`.
+
+After testing, revoke only disposable links. Remove only the receipt's disposable source
+paths if cleanup is approved, never the reused canonical card. On a lost response inspect
+that same temporary view before recovery; `manual_recovery_required` is not a clean PASS.
+Rebuild existing partner views after the runtime upgrade through MCP, preserving URLs and
+source content; editorial changes are a separate owner-approved content operation.
 
 Publication is not atomic with the source commit. A source commit followed by publish
 failure must return `applied_not_published` (or an equally explicit status), retain the
@@ -157,9 +183,13 @@ source revision, and be recoverable with idempotent `rebuild`.
 
 ## Rollback
 
-For content rollback, preserve the pre-change bundle and re-apply it against the then
-current revision with `publish=true`; the stable link remains unchanged. For runtime
-rollback, stop only `showcase-runtime` and `showcase-static`, restart `remote-mcp`
-without the overlay, and remove Showcase scopes. Preserve the named state volume until
-every active URL has been explicitly revoked or migrated. This runtime requires neither
-PostgreSQL nor Kaggle.
+For runtime rollback restore the previous tested edge/runtime image pair and configuration,
+preserving private state, gateway/OAuth grants and existing static pages. Do not revoke
+partner links or delete the named state volume to undo an application release.
+For content rollback, preserve the pre-change bundle, review concurrent changes and apply
+only the intended correction against the current revision with `mode=publish`; shared-card
+protection remains active. Source already committed during a partial publish must be
+accounted for explicitly. This runtime requires neither PostgreSQL nor Kaggle.
+
+The Compose gateway timeout fallback is 240 seconds, matching the Python gateway default.
+Explicit deployed environment values still take precedence and must be checked at rollout.

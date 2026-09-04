@@ -1,0 +1,6 @@
+---
+const { id, title } = Astro.props;
+---
+<button type="button" class="interest-button" data-interest-id={id} aria-pressed="false" aria-label={`Интересно: ${title}`}>
+  <span data-interest-mark aria-hidden="true">☆</span> Интересно
+</button>

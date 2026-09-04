@@ -4,9 +4,12 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol
@@ -16,11 +19,8 @@ from urllib.request import Request, urlopen
 
 import yaml
 
-from .models import ShowcaseBundle, ShowcaseItem, ShowcaseView
-
-
-class ShowcaseSourceError(RuntimeError):
-    """Raised when a showcase source cannot produce one consistent snapshot."""
+from .models import _ID_PATTERN, ShowcaseBundle, ShowcaseItem, ShowcaseView
+from .requests import ShowcaseRequestError, ShowcaseSourceError
 
 
 class ShowcaseSourceNotFoundError(ShowcaseSourceError):
@@ -41,6 +41,69 @@ def _parse_yaml(raw: str, *, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ShowcaseSourceError(f"{label} must contain a YAML object")
     return value
+
+
+class ShowcaseSnapshot:
+    """One immutable revision; lazily read only requested curated records."""
+
+    def __init__(self, revision: str, read: Callable[[str], str], views: Callable[[], list[str]]) -> None:
+        self.revision = revision
+        self._read_impl = read
+        self._views = views
+        self._cache: dict[str, str] = {}
+        self._users: dict[str, list[str]] | None = None
+
+    def read(self, path: str) -> str:
+        if path not in self._cache:
+            self._cache[path] = self._read_impl(path)
+        return self._cache[path]
+
+    def view_exists(self, view_id: str) -> bool:
+        self._id(view_id)
+        try:
+            self.read(f"views/{view_id}.yaml")
+        except ShowcaseSourceNotFoundError:
+            return False
+        return True
+
+    @staticmethod
+    def _id(value: str) -> None:
+        if not re.fullmatch(_ID_PATTERN, value):
+            raise ShowcaseRequestError("INVALID_FIELD", "view_id")
+
+    def get_item(self, item_id: str) -> ShowcaseItem:
+        self._id(item_id)
+        path = f"items/{item_id}.yaml"
+        item = ShowcaseItem.model_validate(_parse_yaml(self.read(path), label=path))
+        if item.id != item_id:
+            raise ShowcaseRequestError("INVALID_FIELD", "items.id")
+        return item
+
+    def get_source(self, view_id: str, *, allow_drafts: bool = True) -> ShowcaseBundle:
+        self._id(view_id)
+        path = f"views/{view_id}.yaml"
+        view = ShowcaseView.model_validate(_parse_yaml(self.read(path), label=path))
+        if view.id != view_id:
+            raise ShowcaseRequestError("VIEW_ID_MISMATCH", "view.id")
+        items = []
+        for index, item_id in enumerate(view.item_ids):
+            try:
+                items.append(self.get_item(item_id))
+            except ShowcaseSourceNotFoundError as exc:
+                raise ShowcaseRequestError("ITEM_NOT_FOUND", f"view.item_ids[{index}]") from exc
+        return ShowcaseBundle.model_validate(
+            {"source_revision": self.revision, "view": view, "items": items},
+            context={"allow_drafts": allow_drafts},
+        )
+
+    def users(self, item_id: str) -> list[str]:
+        if self._users is None:
+            self._users = {}
+            for path in self._views():
+                doc = _parse_yaml(self.read(path), label=path)
+                for ref in doc.get("item_ids", []):
+                    self._users.setdefault(ref, []).append(Path(path).stem)
+        return self._users.get(item_id, [])
 
 
 class FilesystemShowcaseSource:
@@ -69,24 +132,37 @@ class FilesystemShowcaseSource:
             digest.update(b"\n")
         return digest.hexdigest()
 
-    def get_source(self, view_id: str) -> ShowcaseBundle:
-        return self.load_bundle(view_id)
+    def get_source(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=True)
 
-    def load_bundle(self, view_id: str) -> ShowcaseBundle:
-        view_path = f"views/{view_id}.yaml"
-        view = ShowcaseView.model_validate(_parse_yaml(self._read(view_path), label=view_path))
-        if view.id != view_id:
-            raise ShowcaseSourceError(f"view id mismatch: requested {view_id}, found {view.id}")
-        items: list[ShowcaseItem] = []
-        paths = [view_path]
-        for item_id in view.item_ids:
-            path = f"items/{item_id}.yaml"
-            item = ShowcaseItem.model_validate(_parse_yaml(self._read(path), label=path))
-            if item.id != item_id:
-                raise ShowcaseSourceError(f"item id mismatch: requested {item_id}, found {item.id}")
-            items.append(item)
-            paths.append(path)
-        return ShowcaseBundle(source_revision=self._revision(paths), view=view, items=items)
+    def load_bundle(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=False)
+
+    @contextmanager
+    def snapshot(self, at_revision: str | None = None) -> Iterator[ShowcaseSnapshot]:
+        files: dict[str, str] = {}
+        for directory in ("views", "items"):
+            for path in sorted((self.root / directory).glob("*.yaml")):
+                if path.is_symlink():
+                    raise ShowcaseSourceError("unsafe Showcase symlink")
+                relative = f"{directory}/{path.name}"
+                files[relative] = self._read(relative)
+        digest = hashlib.sha256()
+        for relative, raw in sorted(files.items()):
+            digest.update(relative.encode() + b"\0" + raw.encode() + b"\n")
+        revision = digest.hexdigest()
+        if at_revision is not None and revision != at_revision:
+            raise ShowcaseRequestError("REVISION_CONFLICT")
+
+        def read(relative: str) -> str:
+            try:
+                return files[relative]
+            except KeyError as exc:
+                raise ShowcaseSourceNotFoundError("showcase source is absent") from exc
+
+        yield ShowcaseSnapshot(revision, read, lambda: [p for p in files if p.startswith("views/")])
 
 
 class GitHubShowcaseSource:
@@ -154,25 +230,36 @@ class GitHubShowcaseSource:
         except (ValueError, UnicodeDecodeError) as exc:
             raise ShowcaseSourceError(f"GitHub file is not UTF-8 text: {relative}") from exc
 
-    def load_bundle(self, view_id: str) -> ShowcaseBundle:
-        revision = self._revision()
-        view_path = f"views/{view_id}.yaml"
-        view = ShowcaseView.model_validate(_parse_yaml(self._read_at_revision(view_path, revision), label=view_path))
-        if view.id != view_id:
-            raise ShowcaseSourceError(f"view id mismatch: requested {view_id}, found {view.id}")
-        items: list[ShowcaseItem] = []
-        for item_id in view.item_ids:
-            item_path = f"items/{item_id}.yaml"
-            item = ShowcaseItem.model_validate(
-                _parse_yaml(self._read_at_revision(item_path, revision), label=item_path)
-            )
-            if item.id != item_id:
-                raise ShowcaseSourceError(f"item id mismatch: requested {item_id}, found {item.id}")
-            items.append(item)
-        return ShowcaseBundle(source_revision=revision, view=view, items=items)
+    def load_bundle(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=False)
 
-    def get_source(self, view_id: str) -> ShowcaseBundle:
-        return self.load_bundle(view_id)
+    def get_source(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=True)
+
+    @contextmanager
+    def snapshot(self, at_revision: str | None = None) -> Iterator[ShowcaseSnapshot]:
+        revision = at_revision or self._revision()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ShowcaseRequestError("REVISION_CONFLICT")
+
+        def views() -> list[str]:
+            commit = self._request_json(f"https://api.github.com/repos/{self.repository}/git/commits/{revision}")
+            tree_sha = commit["tree"]["sha"]
+            tree = self._request_json(
+                f"https://api.github.com/repos/{self.repository}/git/trees/{tree_sha}?recursive=1"
+            )
+            if tree.get("truncated"):
+                raise ShowcaseSourceError("cannot verify shared cards from a truncated tree")
+            prefix = f"{self.root}/views/"
+            return [
+                entry["path"][len(self.root) + 1 :]
+                for entry in tree["tree"]
+                if entry.get("type") == "blob" and entry["path"].startswith(prefix) and entry["path"].endswith(".yaml")
+            ]
+
+        yield ShowcaseSnapshot(revision, lambda path: self._read_at_revision(path, revision), views)
 
 
 class GitHubShowcaseWriter:
@@ -221,7 +308,7 @@ class GitHubShowcaseWriter:
         refdoc = self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
         current = str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
         if current != expected_revision:
-            raise ShowcaseSourceError("source revision conflict")
+            raise ShowcaseRequestError("REVISION_CONFLICT")
         commit = self._request(f"{base}/commits/{current}")
         tree = str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
         entries = []
@@ -245,13 +332,15 @@ class GitHubShowcaseWriter:
         )
         return new_sha
 
-    def create(self, *, view_id: str, files: dict[str, str], message: str) -> str:
+    def create(self, *, view_id: str, files: dict[str, str], message: str, expected_revision: str | None = None) -> str:
         """Create a bounded view only if its view path is absent at the CAS base."""
         base = f"https://api.github.com/repos/{self.repository}/git"
         refdoc = self._request(f"{base}/ref/heads/{quote(self.ref, safe='')}")
         current = str(refdoc.get("object", {}).get("sha", "")) if isinstance(refdoc.get("object"), dict) else ""
         if len(current) != 40:
             raise ShowcaseSourceError("GitHub did not return an exact source revision")
+        if expected_revision is not None and current != expected_revision:
+            raise ShowcaseRequestError("REVISION_CONFLICT")
         commit = self._request(f"{base}/commits/{current}")
         tree = str(commit.get("tree", {}).get("sha", "")) if isinstance(commit.get("tree"), dict) else ""
         listing = self._request(f"{base}/trees/{quote(tree, safe='')}?recursive=1")
@@ -261,8 +350,12 @@ class GitHubShowcaseWriter:
             else set()
         )
         target = f"{self.root}/views/{view_id}.yaml"
+        if listing.get("truncated"):
+            raise ShowcaseSourceError("cannot verify create paths from a truncated tree")
         if target in paths:
-            raise ShowcaseSourceError("showcase view already exists")
+            raise ShowcaseRequestError("VIEW_EXISTS")
+        if any(f"{self.root}/{path}" in paths for path in files if path.startswith("items/")):
+            raise ShowcaseRequestError("ITEM_ID_CONFLICT", "items")
         return self.apply(expected_revision=current, files=files, message=message)
 
 
@@ -314,10 +407,12 @@ class GitSshShowcaseSource:
             raise ShowcaseSourceError(f"Git SSH source command failed: {argv[0]} {argv[1]}")
         return result.stdout.strip()
 
-    def get_source(self, view_id: str) -> ShowcaseBundle:
-        return self.load_bundle(view_id)
+    def get_source(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=True)
 
-    def load_bundle(self, view_id: str) -> ShowcaseBundle:
+    @contextmanager
+    def snapshot(self, at_revision: str | None = None) -> Iterator[ShowcaseSnapshot]:
         ssh_command = shlex.join(
             [
                 "ssh",
@@ -351,7 +446,7 @@ class GitSshShowcaseSource:
                 env=env,
             )
             self._run(
-                ["git", "fetch", "--quiet", "--filter=blob:none", "--depth=1", "origin", self.ref],
+                ["git", "fetch", "--quiet", "--filter=blob:none", "--depth=1", "origin", at_revision or self.ref],
                 cwd=checkout,
                 env=env,
             )
@@ -359,8 +454,13 @@ class GitSshShowcaseSource:
             if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
                 raise ShowcaseSourceError("Git SSH source did not resolve an exact commit SHA")
             self._run(["git", "checkout", "--quiet", "--detach", revision], cwd=checkout, env=env)
-            bundle = FilesystemShowcaseSource(checkout / self.root).load_bundle(view_id)
-            return bundle.model_copy(update={"source_revision": revision})
+            with FilesystemShowcaseSource(checkout / self.root).snapshot() as snapshot:
+                snapshot.revision = revision
+                yield snapshot
+
+    def load_bundle(self, view_id: str, *, revision: str | None = None) -> ShowcaseBundle:
+        with self.snapshot(revision) as snapshot:
+            return snapshot.get_source(view_id, allow_drafts=False)
 
 
 class GitSshShowcaseWriter:
@@ -456,14 +556,14 @@ class GitSshShowcaseWriter:
         self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout)
         head = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout)
         if head != expected_revision:
-            raise ShowcaseSourceError("source revision conflict")
+            raise ShowcaseRequestError("REVISION_CONFLICT")
         self._run(["git", "checkout", "--quiet", "--detach", head], cwd=checkout)
 
     def _commit(
         self, *, expected_revision: str, files: dict[str, str], message: str, create_view_id: str | None
     ) -> str:
         if len(expected_revision) != 40 or any(c not in "0123456789abcdef" for c in expected_revision):
-            raise ShowcaseSourceError("source revision conflict")
+            raise ShowcaseRequestError("REVISION_CONFLICT")
         safe = self._safe_files(files)
         with TemporaryDirectory(prefix="showcase-git-writer-") as temp:
             checkout = Path(temp)
@@ -474,7 +574,9 @@ class GitSshShowcaseWriter:
             if create_view_id is not None:
                 target = root / "views" / f"{create_view_id}.yaml"
                 if target.exists() or target.is_symlink():
-                    raise ShowcaseSourceError("showcase view already exists")
+                    raise ShowcaseRequestError("VIEW_EXISTS")
+                if any((root / p).exists() or (root / p).is_symlink() for p in safe if p.startswith("items/")):
+                    raise ShowcaseRequestError("ITEM_ID_CONFLICT", "items")
             for relative, content in sorted(safe.items()):
                 target = (root / relative).resolve()
                 if target.parent != (root / Path(relative).parent).resolve() or not target.is_relative_to(root):
@@ -515,7 +617,7 @@ class GitSshShowcaseWriter:
     def apply(self, *, expected_revision: str, files: dict[str, str], message: str) -> str:
         return self._commit(expected_revision=expected_revision, files=files, message=message, create_view_id=None)
 
-    def create(self, *, view_id: str, files: dict[str, str], message: str) -> str:
+    def create(self, *, view_id: str, files: dict[str, str], message: str, expected_revision: str | None = None) -> str:
         if not view_id or "/" in view_id or view_id in {".", ".."}:
             raise ShowcaseSourceError("unsafe showcase view id")
         # The fetched branch head is the create CAS base; path absence is checked there.
@@ -525,4 +627,6 @@ class GitSshShowcaseWriter:
             self._run(["git", "remote", "add", "origin", f"git@github.com:{self.repository}.git"], cwd=checkout)
             self._run(["git", "fetch", "--quiet", "--depth=1", "origin", self.ref], cwd=checkout)
             head = self._run(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout)
+        if expected_revision is not None and head != expected_revision:
+            raise ShowcaseRequestError("REVISION_CONFLICT")
         return self._commit(expected_revision=head, files=files, message=message, create_view_id=view_id)

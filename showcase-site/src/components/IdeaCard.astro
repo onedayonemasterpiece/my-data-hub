@@ -1,49 +1,27 @@
 ---
 import Badge from './Badge.astro';
 import ShareButton from './ShareButton.astro';
-
-interface Props {
-  item: {
-    id: string;
-    title: string;
-    summary: string;
-    audience: { id: string; label: string };
-    category: { id: string; label: string; icon: string };
-    capability_type?: string | null;
-    maturity: { id: string; label: string; tone: string };
-    effort: { id: string; label: string; tone: string };
-    search_text: string;
-  };
-}
-const { item } = Astro.props;
-const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
+import InterestButton from './InterestButton.astro';
+import { maturityLabel, cardPath, cardImage } from '../lib/presentation.mjs';
+const { item, index = 0 } = Astro.props;
+const status = maturityLabel(item.maturity);
 ---
-<article
-  class="idea-card"
-  data-showcase-card
-  data-audience={item.audience.id}
-  data-category={item.category.id}
-  data-capability-type={item.capability_type || ''}
-  data-maturity={item.maturity.id}
-  data-effort={item.effort.id}
-  data-search={item.search_text}
->
-  <div class:list={["idea-card__icon", `idea-card__icon--${item.category.id}`]} aria-hidden="true">
-    {item.category.icon}
-  </div>
+<article class="idea-card" data-showcase-card data-item-id={item.id}
+  data-audience={item.audience.id} data-category={item.category.id}
+  data-capability-type={item.capability_type || ''} data-maturity={item.maturity.id}
+  data-effort={item.effort.id} data-search={item.search_text}>
   <div class="idea-card__body">
     <div class="idea-card__heading">
-      <h2>{item.title}</h2>
-      <Badge label={item.audience.label} tone="blue" />
+      <span class="card-number" aria-label={`Карточка ${item.display_number || index + 1}`}>#{item.display_number || index + 1}</span>
+      <Badge label={status.label} tone={status.tone} />
     </div>
-    <p>{item.summary}</p>
-    <div class="idea-card__meta">
-      <Badge label={item.maturity.label} tone={item.maturity.tone as any} />
-      <Badge label={item.effort.label} tone={item.effort.tone as any} />
-      <a class="idea-card__link" href={`${basePath}/ideas/${item.id}/`}>
-        Подробнее <span aria-hidden="true">→</span>
-      </a>
-    </div>
-    <ShareButton title={item.title} text={item.summary} image={`${basePath}/share/${item.id}.svg`} />
+    <h2><a href={cardPath(item.id)}>{item.title}</a></h2>
+    <p class="card-result">{item.benefit || item.summary}</p>
+    <p class="card-audience">{item.audience.label}</p>
+  </div>
+  <div class="card-actions">
+    <a class="idea-card__link" href={cardPath(item.id)}>Подробнее <span aria-hidden="true">→</span></a>
+    <InterestButton id={item.id} title={item.title} />
+    <ShareButton title={item.title} text={item.summary} image={cardImage(item.id)} url={cardPath(item.id)} compact />
   </div>
 </article>
