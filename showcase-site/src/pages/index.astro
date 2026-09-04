@@ -1,88 +1,55 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
 import IdeaCard from '../components/IdeaCard.astro';
-import { loadShowcase } from '../lib/showcase-data.mjs';
-import showcaseFiltersUrl from '../scripts/showcase-filters.js?url&no-inline';
-import showcaseShareUrl from '../scripts/showcase-share.js?url&no-inline';
+import ContactFooter from '../components/ContactFooter.astro';
 import ShareButton from '../components/ShareButton.astro';
-
-const showcase = loadShowcase();
-const { view, items } = showcase;
-const options = (key) => [...new Map(items.map((item) => [item[key].id, item[key].label])).entries()]
-  .sort((a, b) => a[1].localeCompare(b[1], 'ru'));
+import { loadShowcase } from '../lib/showcase-data.mjs';
+import { basePath, maturityLabel } from '../lib/presentation.mjs';
+import filtersUrl from '../scripts/showcase-filters.js?url&no-inline';
+import interactionsUrl from '../scripts/showcase-share.js?url&no-inline';
+const { view, items } = loadShowcase();
+const wanted = view.filters || ['audience', 'category', 'maturity'];
+const options = (key) => [...new Map(items.map((item) => [item[key].id,
+  key === 'maturity' ? maturityLabel(item[key]).label : item[key].label])).entries()];
+const show = (key) => wanted.includes(key) && options(key).length > 1;
+const capabilityTypes = new Set(items.map((item) => item.capability_type).filter(Boolean));
+const showTypes = wanted.includes('capabilityType') && capabilityTypes.size > 1;
+const hasFilters = ['audience', 'category', 'maturity'].some(show) || showTypes;
 ---
 <BaseLayout title={view.title} description={view.subtitle}>
   <header class="hero">
-    <p class="eyebrow">IdeaHub Showcase</p>
+    <p class="eyebrow">IdeaHub</p>
     <h1>{view.title}</h1>
     <p class="hero__subtitle">{view.subtitle}</p>
-    <p class="secret-note"><span aria-hidden="true">⌁</span> {view.access_label}</p>
+    <p class="secret-note">{view.access_label}</p>
   </header>
-
-  <section class="controls" aria-label="Поиск и фильтры">
-    <label class="search-field">
-      <span class="sr-only">Поиск</span>
-      <span aria-hidden="true">⌕</span>
-      <input id="showcase-search" type="search" placeholder="Поиск идей, задач, возможностей…" autocomplete="off" />
-    </label>
-    <div class="filter-row">
-      <label>
-        <span class="sr-only">Для кого</span>
-        <select data-showcase-filter="audience">
-          <option value="">Для кого</option>
-          {options('audience').map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
+  <section class="controls" aria-label="Поиск и фильтры" data-search-controls>
+    <div class="search-row">
+      <label class="search-field"><span class="sr-only">Поиск</span>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg>
+        <input id="showcase-search" type="search" placeholder="Найти задачу…" autocomplete="off" />
       </label>
-      <label>
-        <span class="sr-only">Задача</span>
-        <select data-showcase-filter="category">
-          <option value="">Задача</option>
-          {options('category').map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
-      </label>
-      <label>
-        <span class="sr-only">Тип возможности</span>
-        <select data-showcase-filter="capabilityType" aria-label="Тип возможности">
-          <option value="">Все типы возможностей</option>
-          <option value="technical">Техническая</option>
-          <option value="product">Продуктовая</option>
-          <option value="business">Бизнес</option>
-        </select>
-      </label>
-      <label>
-        <span class="sr-only">Готовность</span>
-        <select data-showcase-filter="maturity">
-          <option value="">Готовность</option>
-          {options('maturity').map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
-      </label>
-      <label>
-        <span class="sr-only">Ресурсоёмкость</span>
-        <select data-showcase-filter="effort">
-          <option value="">Ресурсоёмкость</option>
-          {options('effort').map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
-      </label>
+      {hasFilters && <button type="button" class="filter-toggle" data-filter-toggle aria-controls="showcase-filter-panel" aria-expanded="false">Фильтры</button>}
     </div>
+    {hasFilters && <div class="filter-row" id="showcase-filter-panel" hidden>
+      {show('audience') && <label>Для кого<select data-showcase-filter="audience"><option value="">Все аудитории</option>{options('audience').map(([id,label]) => <option value={id}>{label}</option>)}</select></label>}
+      {show('category') && <label>Задача<select data-showcase-filter="category"><option value="">Все задачи</option>{options('category').map(([id,label]) => <option value={id}>{label}</option>)}</select></label>}
+      {show('maturity') && <label>Готовность<select data-showcase-filter="maturity"><option value="">Все статусы</option>{options('maturity').map(([id,label]) => <option value={id}>{label}</option>)}</select></label>}
+      {showTypes && <label>Тип возможности<select data-showcase-filter="capabilityType"><option value="">Все типы</option>
+        {capabilityTypes.has('technical') && <option value="technical">Техническая</option>}
+        {capabilityTypes.has('product') && <option value="product">Продуктовая</option>}
+        {capabilityTypes.has('business') && <option value="business">Бизнес</option>}
+      </select></label>}
+      <button type="button" data-filter-reset>Сбросить</button>
+    </div>}
   </section>
-
   <main>
     <p id="showcase-result-count" class="result-count" aria-live="polite">{items.length} возможностей</p>
-    <div class="card-list">
-      {items.map((item) => <IdeaCard item={item} />)}
-    </div>
-    <p id="showcase-empty" class="empty-state" hidden>По этим условиям карточек пока нет.</p>
+    <div class="card-list">{items.map((item,index) => <IdeaCard item={item} index={index} />)}</div>
+    <div id="showcase-empty" class="empty-state" hidden><p>По этим условиям карточек пока нет.</p><button type="button" data-filter-reset>Сбросить поиск и фильтры</button></div>
   </main>
-
-  <footer class="contact-card">
-    <span class="contact-card__icon" aria-hidden="true">💬</span>
-    <div>
-      <strong>{view.contact.title}</strong>
-      <p>{view.contact.label}: <a href={view.contact.href} rel="noreferrer">{view.contact.value}</a></p>
-    </div>
-  </footer>
-
-  <ShareButton title={view.title} text={view.subtitle} image={`${import.meta.env.BASE_URL.replace(/\/$/u, '')}/share/idea-hub.svg`} />
-  <script type="module" src={showcaseFiltersUrl}></script>
-  <script type="module" src={showcaseShareUrl}></script>
+  <ContactFooter />
+  <ShareButton title={view.title} text={view.subtitle} image={`${basePath()}/share/view.png`} url={`${basePath()}/`} />
+  <script type="module" src={filtersUrl}></script>
+  <script type="module" src={interactionsUrl}></script>
 </BaseLayout>

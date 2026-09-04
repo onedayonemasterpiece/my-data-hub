@@ -1,14 +1,12 @@
 ---
 import '../styles/global.css';
-
-interface Props {
-  title: string;
-  description?: string;
-  backHref?: string;
-}
-
-const { title, description = '', backHref } = Astro.props;
-const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
+import { loadShowcase } from '../lib/showcase-data.mjs';
+import { basePath } from '../lib/presentation.mjs';
+interface Props { title: string; description?: string; backHref?: string; image?: string; }
+const { title, description = '', backHref, image = `${basePath()}/share/view.png` } = Astro.props;
+const { view } = loadShowcase();
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+const imageUrl = new URL(image, Astro.site).href;
 ---
 <!doctype html>
 <html lang="ru">
@@ -19,15 +17,22 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
     <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="light" />
     <title>{title}</title>
-    {description && <meta name="description" content="Закрытая витрина возможностей" />}
+    <meta name="description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ru_RU" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={imageUrl} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={title} />
+    <meta name="twitter:card" content="summary_large_image" />
   </head>
-  <body>
+  <body data-showcase-view={view.id} data-showcase-title={view.title}>
     <div class="page-shell">
-      {backHref && (
-        <a class="back-link" href={`${basePath}${backHref}`} aria-label="Назад к витрине">
-          <span aria-hidden="true">←</span> Назад
-        </a>
-      )}
+      {backHref && <a class="back-link" href={`${basePath()}${backHref}`} aria-label="Назад к витрине">← Назад</a>}
       <slot />
     </div>
   </body>

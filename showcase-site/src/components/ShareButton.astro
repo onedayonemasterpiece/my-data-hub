@@ -1,10 +1,19 @@
 ---
-interface Props { title: string; text: string; image: string; }
-const { title, text, image } = Astro.props;
+interface Props { title: string; text: string; image: string; url: string; compact?: boolean; }
+const { title, text, image, url, compact = false } = Astro.props;
 ---
-<div class="share-controls" data-share data-share-title={title} data-share-text={text} data-share-image={image}>
-  <button class="share-button" type="button" data-share-button>Поделиться</button>
-  <button class="share-copy" type="button" data-share-copy>Скопировать ссылку</button>
-  <a class="share-download" href={image} download>Скачать визитку</a>
-  <span class="sr-only" aria-live="polite" data-share-status></span>
+<div class="share-controls" data-share data-share-title={title} data-share-text={text} data-share-image={image} data-share-url={url}>
+  <button class="share-button" class:list={{ 'icon-button': compact }} type="button" data-share-button aria-label={`Поделиться: ${title}`}>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M5 13v7h14v-7" /></svg>
+    {!compact && <span>Поделиться</span>}
+  </button>
+  {!compact && <details class="share-menu">
+    <summary aria-label="Другие способы поделиться">Ещё</summary>
+    <div class="share-menu__items">
+      <button class="share-copy" type="button" data-share-copy>Копировать текст и ссылку</button>
+      <a class="share-download" href={image} download>Скачать картинку</a>
+    </div>
+  </details>}
+  <span class="share-status" role="status" data-share-status></span>
+  <label class="share-fallback" data-share-fallback hidden>Текст и ссылка для копирования<textarea readonly aria-label="Текст и ссылка"></textarea></label>
 </div>
