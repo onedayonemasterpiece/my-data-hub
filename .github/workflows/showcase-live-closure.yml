@@ -1,8 +1,9 @@
 name: IdeaHub Showcase live closure
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches:
+      - ops/showcase-live-closure-20260904
     paths:
       - .github/workflows/showcase-live-closure.yml
       - scripts/showcase_live_closure.py
@@ -12,12 +13,11 @@ permissions:
 
 jobs:
   live-closure:
-    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
-      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_READER_TOKEN || secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN || secrets.MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN || secrets.MY_DATA_HUB_MCP_READER_TOKEN || secrets.MY_DATA_HUB_DATA_MCP_READER_TOKEN || secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
       SHOWCASE_LIVE_RECEIPT: artifacts/showcase-live-closure.json
     steps:
       - uses: actions/checkout@v4
