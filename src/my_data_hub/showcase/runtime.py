@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from my_data_hub.showcase.gateway import (
     SHOWCASE_GATEWAY_PATH,
@@ -28,6 +28,14 @@ from my_data_hub.showcase.gateway import (
     SHOWCASE_WRITE_TOOLS,
 )
 from my_data_hub.showcase.manager import ShowcaseManager
+from my_data_hub.showcase.requests import (
+    MAX_ARGUMENT_BYTES,
+    MAX_REQUEST_BYTES,
+    ShowcaseRequestError,
+    ShowcaseSourceError,
+    resolve_mode,
+)
+from my_data_hub.showcase.source import ShowcaseSourceNotFoundError
 
 _IDEMPOTENCY = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 _SECRET_SLUG = re.compile(r"^[A-Za-z0-9_-]{24,160}$")
@@ -82,7 +90,7 @@ class ShowcaseRuntimeSettings:
     operation_journal: Path
     host: str = "127.0.0.1"
     port: int = 8790
-    max_request_bytes: int = 65_536
+    max_request_bytes: int = MAX_REQUEST_BYTES
     site_template_dir: Path | None = None
     site_runtime_dir: Path | None = None
 
@@ -110,7 +118,7 @@ class ShowcaseRuntimeSettings:
             raise ShowcaseRuntimeRequestError("showcase runtime must bind to a loopback address")
         try:
             port = int(os.getenv("MY_DATA_HUB_SHOWCASE_RUNTIME_PORT", "8790"))
-            max_request_bytes = int(os.getenv("MY_DATA_HUB_SHOWCASE_MAX_REQUEST_BYTES", "65536"))
+            max_request_bytes = int(os.getenv("MY_DATA_HUB_SHOWCASE_MAX_REQUEST_BYTES", str(MAX_REQUEST_BYTES)))
         except ValueError as exc:
             raise ShowcaseRuntimeRequestError("showcase runtime numeric configuration is invalid") from exc
         if not 1 <= port <= 65535:
@@ -259,14 +267,14 @@ def _operation_key(tool: str, view_id: str, idempotency_key: str) -> str:
 
 
 def _validate_view_id(value: Any) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,79}", value):
-        raise ShowcaseRuntimeRequestError("view_id is invalid")
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]", value):
+        raise ShowcaseRequestError("INVALID_FIELD", "view_id")
     return value
 
 
 def _validate_idempotency_key(value: Any) -> str:
     if not isinstance(value, str) or not _IDEMPOTENCY.fullmatch(value):
-        raise ShowcaseRuntimeRequestError("idempotency_key is invalid")
+        raise ShowcaseRequestError("IDEMPOTENCY_REQUIRED", "idempotency_key")
     return value
 
 
@@ -275,6 +283,9 @@ def _call_method(target: Any, name: str, view_id: str, **kwargs: Any) -> Any:
     if not callable(method):
         raise ShowcaseRuntimeError(f"showcase manager does not implement {name}")
     parameters = inspect.signature(method).parameters
+    if "mode" in kwargs and "mode" not in parameters:
+        selected = kwargs.pop("mode")
+        kwargs.update(dry_run=selected == "preview", publish=selected == "publish")
     accepted = {key: value for key, value in kwargs.items() if key in parameters}
     return method(view_id, **accepted)
 
@@ -390,8 +401,8 @@ class ShowcaseOperationController:
         if principal.expires_at < int(time.time()) - 30:
             raise ShowcaseRuntimeAuthenticationError("principal access token has expired")
         bounded = json.dumps(arguments, ensure_ascii=False).encode()
-        if len(bounded) > 32_768:
-            raise ShowcaseRuntimeRequestError("showcase arguments exceed the semantic limit")
+        if len(bounded) > MAX_ARGUMENT_BYTES:
+            raise ShowcaseRequestError("REQUEST_TOO_LARGE")
         with self._lock:
             if tool == "showcase.list":
                 return _sanitize_list_result(self.manager.list_surfaces())
@@ -406,6 +417,34 @@ class ShowcaseOperationController:
                 if not isinstance(result, dict):
                     raise ShowcaseRuntimeError("showcase manager returned an invalid source result")
                 return result
+            mutation_arguments = {}
+            if tool in {"showcase.apply", "showcase.create_view"}:
+                legacy_registration = (
+                    tool == "showcase.create_view"
+                    and arguments.get("view") is None
+                    and arguments.get("mode") is None
+                    and arguments.get("dry_run") is None
+                )
+                if legacy_registration:
+                    selected = "save" if arguments.get("publish") is False else "publish"
+                    mutation_arguments = {"publish": arguments.get("publish")}
+                else:
+                    selected = resolve_mode(arguments.get("mode"), arguments.get("dry_run"), arguments.get("publish"))
+                    mutation_arguments = {
+                        "view": arguments.get("view"),
+                        "items": arguments.get("items") or [],
+                        "mode": selected,
+                    }
+                    if tool == "showcase.apply":
+                        mutation_arguments["expected_source_revision"] = arguments.get("expected_source_revision")
+                if selected == "preview":
+                    # Pure preview never reads/writes the idempotency journal or consumes a key.
+                    return _call_method(
+                        self.manager,
+                        "apply" if tool == "showcase.apply" else "create_view",
+                        view_id,
+                        **mutation_arguments,
+                    )
             idempotency_key = _validate_idempotency_key(arguments.get("idempotency_key"))
             operation_key = _operation_key(tool, view_id, idempotency_key)
             journal = self.journal.load()
@@ -415,7 +454,7 @@ class ShowcaseOperationController:
             ).hexdigest()
             if isinstance(completed, Mapping) and isinstance(completed.get("result"), (dict, list)):
                 if completed.get("fingerprint") not in {None, fingerprint}:
-                    raise ShowcaseRuntimeConflictError("idempotency key was previously used with different payload")
+                    raise ShowcaseRequestError("IDEMPOTENCY_CONFLICT", "idempotency_key")
                 return _with_duplicate(completed["result"], True)
             if tool == "showcase.rotate_link":
                 result = self._rotate(
@@ -425,17 +464,13 @@ class ShowcaseOperationController:
                     journal=journal,
                 )
             else:
-                if tool == "showcase.apply":
+                if tool in {"showcase.apply", "showcase.create_view"}:
                     result = _call_method(
                         self.manager,
-                        "apply",
+                        "apply" if tool == "showcase.apply" else "create_view",
                         view_id,
-                        expected_source_revision=arguments.get("expected_source_revision"),
-                        view=arguments.get("view"),
-                        items=arguments.get("items", []),
-                        dry_run=arguments.get("dry_run", True),
-                        publish=arguments.get("publish", False),
                         idempotency_key=idempotency_key,
+                        **mutation_arguments,
                     )
                     if not isinstance(result, (dict, list)):
                         raise ShowcaseRuntimeError("showcase manager returned an invalid result")
@@ -525,7 +560,7 @@ def create_app(
     *,
     controller: ShowcaseOperationController,
     token: str,
-    max_request_bytes: int = 65_536,
+    max_request_bytes: int = MAX_REQUEST_BYTES,
 ) -> FastAPI:
     app = FastAPI(
         title="my-data-hub showcase runtime",
@@ -566,12 +601,32 @@ def create_app(
                 headers={"Cache-Control": "no-store"},
             )
         try:
-            invocation = ShowcaseInvocation.model_validate(await request.json())
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > max_request_bytes:
+                    raise ShowcaseRequestError("REQUEST_TOO_LARGE")
+            invocation = ShowcaseInvocation.model_validate_json(bytes(body))
             result = controller.invoke(
                 invocation.tool,
                 invocation.arguments,
                 invocation.principal,
             )
+        except ShowcaseRequestError as exc:
+            return JSONResponse(
+                status_code=exc.http_status, content={"ok": False, "code": exc.code, "error": exc.payload()}
+            )
+        except ShowcaseSourceNotFoundError:
+            error = ShowcaseRequestError("VIEW_NOT_FOUND", "view_id")
+            return JSONResponse(status_code=404, content={"ok": False, "code": error.code, "error": error.payload()})
+        except ValidationError as exc:
+            first = exc.errors(include_url=False, include_input=False)[0]
+            field = ".".join(str(part) for part in first.get("loc", []))[:160]
+            error = ShowcaseRequestError("INVALID_FIELD", field or None)
+            return JSONResponse(status_code=400, content={"ok": False, "code": error.code, "error": error.payload()})
+        except ShowcaseSourceError:
+            error = ShowcaseRequestError("SOURCE_UNAVAILABLE")
+            return JSONResponse(status_code=503, content={"ok": False, "code": error.code, "error": error.payload()})
         except ShowcaseRuntimeAuthenticationError as exc:
             return JSONResponse(status_code=401, content={"ok": False, "code": exc.code})
         except ShowcaseRuntimePermissionError as exc:

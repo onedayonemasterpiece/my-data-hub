@@ -4,7 +4,8 @@ import asyncio
 from typing import Any
 
 from .manager import ShowcaseManager
-from .models import ShowcaseItem, ShowcaseView
+from .models import ShowcaseViewInput, ShowcaseWriteItem
+from .requests import ShowcaseMode
 
 
 def create_server(manager: ShowcaseManager | None = None):  # type: ignore[no-untyped-def]
@@ -56,18 +57,30 @@ def create_server(manager: ShowcaseManager | None = None):  # type: ignore[no-un
     async def showcase_apply(
         view_id: str,
         expected_source_revision: str,
-        view: ShowcaseView | None,
-        idempotency_key: str,
-        items: list[ShowcaseItem] | None = None,
-        dry_run: bool = True,
-        publish: bool = False,
-    ) -> dict[str, Any]:
+        view: ShowcaseViewInput | None = None,
+        idempotency_key: str | None = None,
+        items: list[ShowcaseWriteItem] | None = None,
+        mode: ShowcaseMode | None = None,
+        dry_run: bool | None = None,
+        publish: bool | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Update a showcase; keep its URL. Read get_source first and copy source_revision.
+
+        Prefer mode=preview (no writes), save (draft) or publish (save/build/publish).
+        Omit unchanged cards. Pass full definitions only for new/changed cards.
+        Changing a card shared with another view is rejected: give the adaptation a new ID.
+        Preview needs no key; save/publish require a unique idempotency_key, reused on identical retry.
+        Example: view_id='pharma', expected_source_revision='<from get_source>',
+        view={title:'Updated title', subtitle:'Updated description', item_ids:['existing-card']}, mode='preview'.
+        Legacy dry_run/publish and expected_source_revision='absent' remain compatible; do not mix flags with mode.
+        """
         return await asyncio.to_thread(
             control.apply,
             view_id,
             expected_source_revision=expected_source_revision,
             view=view,
             items=items or [],
+            mode=mode,
             dry_run=dry_run,
             publish=publish,
             idempotency_key=idempotency_key,
@@ -78,10 +91,33 @@ def create_server(manager: ShowcaseManager | None = None):  # type: ignore[no-un
         return await asyncio.to_thread(control.rebuild, view_id, idempotency_key=idempotency_key)
 
     @tool("showcase.create_view", read_only=False, idempotent=True)
-    async def showcase_create_view(view_id: str, idempotency_key: str, publish: bool = True) -> dict[str, Any]:
+    async def showcase_create_view(
+        view_id: str,
+        view: ShowcaseViewInput | None = None,
+        items: list[ShowcaseWriteItem] | None = None,
+        mode: ShowcaseMode | None = None,
+        idempotency_key: str | None = None,
+        dry_run: bool | None = None,
+        publish: bool | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Create a NEW showcase from a manifest and return its stable link on publication.
+
+        No source revision or 'absent' value is needed. view.id can be omitted.
+        Existing cards: view={title:'For pharma', subtitle:'Four working tasks', item_ids:['existing-card']}.
+        New card: add its ID to item_ids and pass its complete definition in items,
+        including capability_type (technical/product/business) and publish_state='ready' after review.
+        mode=preview validates without writes/key; mode=save saves a draft; mode=publish saves/builds/publishes.
+        save/publish require idempotency_key; identical retries reuse it. Default with a manifest is preview.
+        Optional contacts override the default Telegram contact; filters=[] hides extra filters.
+        Legacy calls without view only register an already existing source; never use that form to create content.
+        """
         return await asyncio.to_thread(
             control.create_view,
             view_id,
+            view=view,
+            items=items or [],
+            mode=mode,
+            dry_run=dry_run,
             publish=publish,
             idempotency_key=idempotency_key,
         )

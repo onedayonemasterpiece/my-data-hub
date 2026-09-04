@@ -82,17 +82,33 @@ class ShowcaseItem(StrictModel):
 
     def published(self, contact: Contact) -> dict[str, object]:
         search_parts = [
-            self.title, self.summary, self.audience.label, self.category.label,
-            self.capability_type or "", self.maturity.label, self.effort.label,
-            self.benefit, *self.for_whom, *self.available, *self.requirements,
+            self.title,
+            self.summary,
+            self.audience.label,
+            self.category.label,
+            self.capability_type or "",
+            self.maturity.label,
+            self.effort.label,
+            self.benefit,
+            *self.for_whom,
+            *self.available,
+            *self.requirements,
         ]
         return {
-            "id": self.id, "title": self.title, "summary": self.summary,
-            "audience": self.audience.model_dump(), "category": self.category.model_dump(),
-            "capability_type": self.capability_type, "maturity": self.maturity.model_dump(),
-            "effort": self.effort.model_dump(), "benefit": self.benefit,
-            "for_whom": self.for_whom, "available": self.available, "requirements": self.requirements,
-            "featured": self.featured, "contact": contact.model_dump(),
+            "id": self.id,
+            "title": self.title,
+            "summary": self.summary,
+            "audience": self.audience.model_dump(),
+            "category": self.category.model_dump(),
+            "capability_type": self.capability_type,
+            "maturity": self.maturity.model_dump(),
+            "effort": self.effort.model_dump(),
+            "benefit": self.benefit,
+            "for_whom": self.for_whom,
+            "available": self.available,
+            "requirements": self.requirements,
+            "featured": self.featured,
+            "contact": contact.model_dump(),
             "search_text": " ".join(search_parts).casefold(),
         }
 
@@ -111,7 +127,8 @@ class ShowcaseView(StrictModel):
     access_label: str = Field(default="Доступ по ссылке", min_length=3, max_length=100)
     visibility_ceiling: Visibility = "partner"
     item_ids: list[str] = Field(
-        min_length=1, max_length=100,
+        min_length=1,
+        max_length=100,
         description="Canonical order. Existing card IDs are resolved by the server; do not resend them in items.",
     )
     contact: Contact = Field(default_factory=Contact)
@@ -148,7 +165,9 @@ class ShowcaseView(StrictModel):
 class ShowcaseViewInput(ShowcaseView):
     """The outer view_id supplies identity; id is accepted for old clients only."""
 
-    id: str | None = Field(default=None, pattern=_ID_PATTERN, description="Optional legacy field; prefer outer view_id.")
+    id: str | None = Field(
+        default=None, pattern=_ID_PATTERN, description="Optional legacy field; prefer outer view_id."
+    )
 
 
 class ShowcaseBundle(StrictModel):
@@ -187,13 +206,16 @@ class ShowcaseBundle(StrictModel):
             "schema_version": 1,
             "source_revision": self.source_revision,
             "view": {
-                "id": self.view.id, "title": self.view.title, "subtitle": self.view.subtitle,
-                "access_label": self.view.access_label, "contact": contacts[0].model_dump(),
-                "contacts": [contact.model_dump() for contact in contacts], "filters": self.view.filters,
+                "id": self.view.id,
+                "title": self.view.title,
+                "subtitle": self.view.subtitle,
+                "access_label": self.view.access_label,
+                "contact": contacts[0].model_dump(),
+                "contacts": [contact.model_dump() for contact in contacts],
+                "filters": self.view.filters,
             },
             "items": [
-                {**item.published(contacts[0]), "display_number": index + 1}
-                for index, item in enumerate(ordered)
+                {**item.published(contacts[0]), "display_number": index + 1} for index, item in enumerate(ordered)
             ],
         }
 
