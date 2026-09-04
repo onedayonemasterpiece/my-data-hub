@@ -193,3 +193,67 @@ accounted for explicitly. This runtime requires neither PostgreSQL nor Kaggle.
 
 The Compose gateway timeout fallback is 240 seconds, matching the Python gateway default.
 Explicit deployed environment values still take precedence and must be checked at rollout.
+
+## PR #38 integration gate — 2026-09-04 UTC
+
+**Integrated, not deployed; live acceptance is not closed.** PR #38 was squash-merged
+as `27a187a28f1cdbfe27951f985933d702984060a1`. Its tree exactly matches tested PR tip
+`cc1857d6385c68d82f1efb0601c4fcd0305cc5a6`. The integration fixes reject incomplete
+constructors before publication and align the Compose timeout fallback to 240 seconds.
+
+| Request | Status / evidence |
+| --- | --- |
+| R1 — fresh integration and tests | Done. Fresh main, PR comments/diff/CI reviewed; exact-tip CI green; squash merge preserves the final tree without transitional workflows. |
+| R2 — protected baseline | Done. Private 0700/0600 backups contain container inspection/config, state/public archives, active-link hashes and raw YAML SHA-256/Git blob hashes for main and pharma-business-ai. Source revision `c4a234cbd6031ac03562793e02553f01d0e4330d`; no cross-version serialized-default comparison. |
+| R3 — paired rollout | Blocked pending an authorized CLI acceptance credential. No services/config switched. Actual old runtime request limit remains 65536 and edge timeout remains 180; required new values are **not yet deployed**. Existing external MCP proxy read/send budgets are 300 seconds. |
+| R4 — fresh authorized schemas/preview | Partial. Connected ChatGPT MCP `get_source(main)` succeeds. Existing CLI operator credential returns HTTP 401 `invalid_scope` during edge initialization, not a master checkpoint failure. Cached ChatGPT apply schema rejects the source contact href and requires an idempotency key before runtime; this is not a successful preview. Fresh new-schema discovery/preview remain pending. |
+| R5 — partner rebuilds | Pending. Neither partner surface was rebuilt/rotated/revoked or editorially changed. |
+| R6 — disposable live acceptance | Blocked on credential. Runner and additional negatives have not run; no disposable source/link was created, so no cleanup is claimed. |
+| R7 — public browser acceptance | Pending rollout. Real Chromium fixture acceptance passed at all three requested sizes; it is not post-deploy public acceptance. No partner messages, native OS sharing, or messenger delivery/readback performed. |
+| R8 — release evidence/rollback | Partial. Baseline and coordinated rollback images retained; no rollback needed because deployment was held. Final deployed/live receipts and owner reconnect checks remain open. |
+
+Validation at the tested tip:
+
+- `SHOWCASE_BROWSER=1 pytest -q tests/showcase`: initial 88 passed; after the
+  constructor regression, all **89 Showcase tests** also pass within the full run.
+- Full suite: **1806 passed, 4 skipped** (non-Showcase live prerequisites).
+  An initial local invariant failure was caused by an archived duplicate Compose tree
+  under artifacts; the archive was relocated outside the test worktree, without
+  weakening the invariant. Complete rerun is green.
+- Repository validator, tracked-secret scan, compileall, Ruff, mypy and notebook drift
+  check pass. GitHub Actions runs `33927462668` (contracts/PostgreSQL) and
+  `33927462659` / `33927459947` (Showcase/browser/build) pass at the exact PR tip.
+- Clean archive Docker builds passed for both images. Isolated renderer ran as
+  UID 65532, read-only, network disabled, 1 CPU, 512 MiB memory/no extra swap and
+  256 MiB work tmpfs. Main: 32 cards, 33 HTML/PNG, 24.09 s; pharma: 6 cards,
+  7 HTML/PNG, 21.42 s. All 40 PNGs have PNG signatures and 1200×630 dimensions.
+  These were isolated output builds, **not partner publication**.
+
+Built, **not deployed**, image IDs (tagged with tested tip `cc1857d6…`):
+
+- edge: `sha256:da6119f1251f1538c1a68f916ae8d9c421f4e561b86d40c5a2e8494ae5d7ef31`
+- renderer: `sha256:2c278efb0c0c0988d86eab89ec909de95d1b688df1a1289507070a9857434026`
+
+Still deployed from `622031f36f937a3015e17f361a1088b6864a3f03`, all five services healthy:
+
+- edge: `sha256:af7cac55eb0b82fe6590a388c201080e3c7395506026e690bcb4089dd20b020f`
+- renderer: `sha256:d7ce1e8b0c863e4854dee24db15292369e0a292210ec225409a0a2ae146b0066`
+
+Dependency audit is **not zero**: npm reports Astro/Sharp high and esbuild low
+advisories. No automatic dependency upgrade was applied. The Sharp advisory concerns
+untrusted image decoders; this renderer feeds only its own XML-escaped SVG, not
+uploaded GIF/TIFF/VIPS input. This bounded observation does not certify the entire
+package dependency graph. See [the Sharp maintainer advisory](https://github.com/lovell/sharp/security/advisories/GHSA-f88m-g3jw-g9cj).
+Retain the audit output for security follow-up rather than describing it as clean.
+
+Local evidence: `artifacts/pr38-release-20260904/` in the primary repository,
+with private material under its protected `private/` directory (never commit).
+Only reproducible build caches and two obsolete non-running image tags were removed
+for disk space; current rollback images, volumes, state and pages were preserved.
+
+Next gate: supply an existing credential with `showcase:read showcase:write`, or
+owner-authorize a separate temporary OAuth grant through the existing flow. Do not
+widen/revoke the owner's current grant or copy its rotating refresh token into a new
+file. Then revalidate current source/config, execute the coordinated rollout and
+complete R4–R8. Owner refresh/reconnect and a fresh owner-client tools/list plus
+keyless preview remain **pending**, not already achieved by the server work.
