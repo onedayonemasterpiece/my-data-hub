@@ -7,6 +7,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -35,6 +36,7 @@ from my_data_hub.voice_intake.gemini import (
 )
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
 
+from .checkpoint import AccountingPending, StageCheckpoint
 from .contracts import InferenceReceipt
 from .worker import StageFailure
 
@@ -77,7 +79,8 @@ class AggregateGeminiInference:
         self.clock = clock
 
     async def transcribe(
-        self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any]
+        self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any],
+        checkpoint: StageCheckpoint | None = None,
     ) -> InferenceReceipt:
         audio = audio_path.read_bytes()
         # Documented Gemini audio admission is 32 tokens/second. This uses
@@ -89,11 +92,12 @@ class AggregateGeminiInference:
             audio=audio, audio_mime_type="audio/mpeg", reserved_tpm=reserve,
             max_output_tokens=TRANSCRIPTION_MAX_OUTPUT_TOKENS,
             consumer="my-data-hub.voice-intake.transcribe.v2",
-            schema_name=TRANSCRIPT_SCHEMA_NAME,
+            schema_name=TRANSCRIPT_SCHEMA_NAME, checkpoint=checkpoint,
         )
 
     async def summarize(
-        self, *, transcript: dict[str, Any], terminology: dict[str, Any]
+        self, *, transcript: dict[str, Any], terminology: dict[str, Any],
+        checkpoint: StageCheckpoint | None = None,
     ) -> InferenceReceipt:
         rendered = json.dumps(transcript, ensure_ascii=False, sort_keys=True)
         prompt = (
@@ -108,7 +112,7 @@ class AggregateGeminiInference:
             prompt=prompt, schema=SUMMARY_JSON_SCHEMA, output_type=SummaryPayload,
             audio=None, audio_mime_type=None, reserved_tpm=reserve,
             max_output_tokens=16_384, consumer="my-data-hub.voice-intake.summarize.v2",
-            preflight=preflight, schema_name=SUMMARY_SCHEMA_NAME,
+            preflight=preflight, schema_name=SUMMARY_SCHEMA_NAME, checkpoint=checkpoint,
         )
 
     async def _preflight(self) -> LimiterPreflight:
@@ -133,6 +137,7 @@ class AggregateGeminiInference:
         consumer: str,
         schema_name: str,
         preflight: LimiterPreflight | None = None,
+        checkpoint: StageCheckpoint | None = None,
     ) -> InferenceReceipt:
         model = self.settings.model
         if model not in self.settings.allowed_models or "flash-lite" not in model.lower():
@@ -172,6 +177,8 @@ class AggregateGeminiInference:
         finish_reason = "UNSPECIFIED"
         parsed_value: Any = _MISSING
         try:
+            if checkpoint is not None:
+                checkpoint.dispatch()
             response = await self.requester.request_json(
                 "POST",
                 "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -245,9 +252,35 @@ class AggregateGeminiInference:
                     max_output_tokens=max_output_tokens,
                 ),
             ) from exc
-        await self._finalize(lease, started, usage, "succeeded", None)
         public = self.limiter.public_lease(lease, actual_tpm=usage.total_tokens if usage else None)
-        return InferenceReceipt(value=value.model_dump(mode="json"), request_uid=request_uid, limiter=public)
+        receipt = InferenceReceipt(value=value.model_dump(mode="json"), request_uid=request_uid, limiter=public)
+        if checkpoint is None:
+            await self._finalize(lease, started, usage, "succeeded", None)
+            return receipt
+        checkpoint.save(receipt, {
+            "lease": asdict(lease), "usage": usage.model_dump(mode="json") if usage else None,
+            "duration_ms": int((self.clock() - started) * 1000),
+        })
+        # The response and request identity survive even if the limiter is down.
+        return await self.resume_receipt(checkpoint)
+
+    async def resume_receipt(self, checkpoint: StageCheckpoint) -> InferenceReceipt:
+        saved = checkpoint.load()
+        if saved is None:
+            raise ValueError("missing inference checkpoint")
+        receipt, accounting = saved
+        if accounting is not None:
+            lease = LimiterLease(**accounting["lease"])
+            usage = ModelUsage.model_validate(accounting["usage"]) if accounting["usage"] else None
+            try:
+                await self.limiter.finalize_generate_content(
+                    lease, usage=usage, duration_ms=accounting["duration_ms"],
+                    provider_status="succeeded", error_type=None, error_code=None, error_message=None,
+                )
+            except Exception as exc:
+                raise AccountingPending("receipt_accounting_pending") from exc
+            checkpoint.save(receipt)
+        return receipt
 
     async def _finalize(
         self, lease: LimiterLease, started: float, usage: ModelUsage | None, status: str, error: str | None

@@ -28,7 +28,7 @@ def _error(
     status: int,
     code: str,
     *,
-    retryable: bool = False,
+    retryable: bool | None = None,
     retry_after_seconds: int | None = None,
     reconciliation_required: bool = False,
 ) -> JSONResponse:
@@ -38,7 +38,7 @@ def _error(
             "api_version": API_VERSION,
             "detail": {
                 "code": code,
-                "retryable": retryable,
+                "retryable": status == 503 if retryable is None else retryable,
                 "retry_after_seconds": retry_after_seconds,
                 "reconciliation_required": reconciliation_required,
             },

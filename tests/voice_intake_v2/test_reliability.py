@@ -117,6 +117,7 @@ async def test_response_is_checkpointed_before_limiter_finalization(
 ):
     from my_data_hub.voice_intake_v2.checkpoint import AccountingPending, StageCheckpoint
     from my_data_hub.voice_intake_v2.inference import AggregateGeminiInference
+
     from .test_inference import Limiter, Requester
 
     class OfflineAccounting(Limiter):
@@ -203,6 +204,7 @@ async def test_quota_preflight_does_not_claim_provider_was_called(
 ):
     from my_data_hub.voice_intake_v2.checkpoint import StageCheckpoint
     from my_data_hub.voice_intake_v2.inference import AggregateGeminiInference
+
     from .test_inference import Limiter, Requester
     path = tmp_path / "session.mp3"
     path.write_bytes(b"synthetic")

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .checkpoint import CheckpointError, StageCheckpoint
 from .contracts import SessionCompleteRequest, SessionCreateRequest, StatusResponse
 
 
@@ -49,6 +50,7 @@ class ClaimedSession:
     transcript: dict[str, Any] | None
     summary: dict[str, Any] | None
     chunks: tuple[ChunkReceipt, ...]
+    github_verified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,10 +194,10 @@ class VoiceIntakeV2Store:
         now = self._clock()
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT create_sha256 FROM sessions WHERE session_id=?", (request.session_id,)
+                "SELECT create_sha256,create_json FROM sessions WHERE session_id=?", (request.session_id,)
             ).fetchone()
             if row is not None:
-                if row["create_sha256"] != digest:
+                if row["create_sha256"] != digest and not self._same_capture(row["create_json"], payload):
                     raise StoreError("session_metadata_conflict")
                 return self.status(request.session_id, connection=connection), True
             required = {
@@ -218,15 +220,26 @@ class VoiceIntakeV2Store:
         os.chmod(directory, 0o700)
         return self.status(request.session_id), False
 
+    @staticmethod
+    def _same_capture(stored_json: str, incoming: dict[str, Any]) -> bool:
+        # APK version is transport telemetry, not immutable capture identity.
+        # Keep the original payload/hash; tolerate no other metadata changes.
+        original = json.loads(stored_json)
+        current = dict(incoming)
+        original.pop("client_version", None)
+        current.pop("client_version", None)
+        return bool(original == current)
+
     def existing_session(self, request: SessionCreateRequest) -> StatusResponse | None:
-        digest = self._canonical(request.model_dump(mode="json"))[1]
+        payload = request.model_dump(mode="json")
+        digest = self._canonical(payload)[1]
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT create_sha256 FROM sessions WHERE session_id=?", (request.session_id,)
+                "SELECT create_sha256,create_json FROM sessions WHERE session_id=?", (request.session_id,)
             ).fetchone()
         if row is None:
             return None
-        if row["create_sha256"] != digest:
+        if row["create_sha256"] != digest and not self._same_capture(row["create_json"], payload):
             raise StoreError("session_metadata_conflict")
         return self.status(request.session_id)
 
@@ -305,15 +318,8 @@ class VoiceIntakeV2Store:
             if session["complete_sha256"] is not None:
                 if session["complete_sha256"] != digest:
                     raise StoreError("complete_manifest_conflict")
-                # Repeating the same authenticated complete request is the
-                # explicit retry signal. It never replays a durable prior
-                # stage: claim() derives the next stage from its artifacts.
-                if session["state"] == "retryable_error" and session["retryable"]:
-                    connection.execute(
-                        """UPDATE sessions SET state='queued',retryable=0,retry_at=NULL,
-                           error_code=NULL,updated_at=? WHERE session_id=?""",
-                        (now, session_id),
-                    )
+                # A duplicated transport request is never consent to another
+                # paid inference. Safe retries are scheduled by the server.
                 return self.status(session_id, connection=connection), True
             create = json.loads(session["create_json"])
             ended = datetime.fromisoformat(request.ended_at)
@@ -400,16 +406,15 @@ class VoiceIntakeV2Store:
             row = connection.execute(
                 """SELECT * FROM sessions
                    WHERE (state IN ('queued','normalizing','publishing','verifying')
-                          OR (state='waiting_quota' AND retry_at<=?))
+                          OR (state IN ('waiting_quota','retryable_error')
+                              AND retryable=1 AND retry_at<=?))
                      AND (lease_until IS NULL OR lease_until<?)
                    ORDER BY updated_at LIMIT 1""",
                 (now, now),
             ).fetchone()
             if row is None:
                 return None
-            state = "normalizing" if row["transcript_json"] is None else (
-                "summarizing" if row["summary_json"] is None else "publishing"
-            )
+            state = "publishing" if row["summary_json"] is not None else "normalizing"
             changed = connection.execute(
                 """UPDATE sessions SET state=?,lease_owner=?,lease_until=?,retryable=0,
                    retry_at=NULL,error_code=NULL,reconciliation_required=0,updated_at=?
@@ -430,27 +435,50 @@ class VoiceIntakeV2Store:
                 terminology=json.loads(row["terminology_json"]),
                 transcript=json.loads(row["transcript_json"]) if row["transcript_json"] else None,
                 summary=json.loads(row["summary_json"]) if row["summary_json"] else None,
-                chunks=chunks,
+                chunks=chunks, github_verified=bool(row["github_verified"]),
             )
 
     def fence_ambiguous_inference(self) -> int:
-        """Fail closed when a lease expired across an in-flight provider stage."""
+        """Recover complete receipts; fence only an unreceipted send boundary."""
         now = self._clock()
+        fenced = 0
         with self._transaction() as connection:
-            return connection.execute(
-                """UPDATE sessions SET state='reconciliation_required',retryable=0,
-                   error_code='provider_outcome_ambiguous',reconciliation_required=1,
-                   lease_owner=NULL,lease_until=NULL,updated_at=?
-                   WHERE state IN ('transcribing','summarizing') AND lease_until<?""",
-                (now, now),
-            ).rowcount
+            rows = connection.execute(
+                """SELECT * FROM sessions WHERE state IN ('transcribing','summarizing')
+                   AND lease_until<?""", (now,),
+            ).fetchall()
+            for row in rows:
+                stage = "transcript" if row["state"] == "transcribing" else "summary"
+                checkpoint = StageCheckpoint(
+                    self.session_directory(row["session_id"]), row["session_id"],
+                    stage, row["complete_sha256"],
+                )
+                try:
+                    saved = checkpoint.load()
+                except CheckpointError:
+                    saved = None
+                if saved is not None:
+                    state, error, reconcile = "queued", None, 0
+                else:
+                    state, error, reconcile = "reconciliation_required", "provider_outcome_ambiguous", 1
+                    fenced += 1
+                connection.execute(
+                    """UPDATE sessions SET state=?,retryable=0,error_code=?,
+                       reconciliation_required=?,lease_owner=NULL,lease_until=NULL,updated_at=?
+                       WHERE session_id=?""",
+                    (state, error, reconcile, now, row["session_id"]),
+                )
+        return fenced
+
+    def renew_lease(self, session_id: str, owner: str, lease_seconds: int) -> None:
+        self._owned_update(session_id, owner, "lease_until=?", (self._clock() + lease_seconds,))
 
     def _owned_update(self, session_id: str, owner: str, sql: str, values: tuple[Any, ...]) -> None:
         now = self._clock()
         with self._transaction() as connection:
             changed = connection.execute(
-                f"UPDATE sessions SET {sql}, updated_at=? WHERE session_id=? AND lease_owner=?",
-                (*values, now, session_id, owner),
+                f"UPDATE sessions SET {sql}, updated_at=? WHERE session_id=? AND lease_owner=? AND lease_until>?",
+                (*values, now, session_id, owner, now),
             ).rowcount
             if changed != 1:
                 raise StoreError("worker_lease_lost")
@@ -464,7 +492,7 @@ class VoiceIntakeV2Store:
     ) -> None:
         self._owned_update(
             session_id, owner,
-            "transcript_json=?,transcript_request_uid=?,transcript_limiter_json=?,state='summarizing'",
+            "transcript_json=?,transcript_request_uid=?,transcript_limiter_json=?,state='normalizing'",
             (self._canonical(value)[0], request_uid, self._canonical(limiter)[0]),
         )
 
@@ -520,7 +548,9 @@ class VoiceIntakeV2Store:
         retry_at: float | None = None, reconciliation_required: bool = False,
     ) -> None:
         state = "reconciliation_required" if reconciliation_required else (
-            "waiting_quota" if retryable and retry_at is not None else "retryable_error"
+            "waiting_quota" if retryable and retry_at is not None and (
+                "quota" in code or "rate_limit" in code or "429" in code
+            ) else "retryable_error"
         )
         self._owned_update(
             session_id, owner,
