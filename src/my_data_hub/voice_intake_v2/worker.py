@@ -139,13 +139,19 @@ class VoiceIntakeV2Worker:
                     diagnostic.get("truncated"),
                 )
             ambiguous = exc.ambiguous
+            # A received/finalized 429 is a known quota rejection, not an
+            # unknown generation outcome. Keep it recoverable through the
+            # shared limiter; no immediate retry occurs inside the adapter.
+            safe_retry = exc.retryable and not ambiguous and (
+                not exc.sent or exc.code == "provider_429"
+            )
             retry_at = (
-                self._clock() + (exc.retry_after_seconds or 30)
-                if not exc.sent and exc.retryable and not exc.ambiguous else None
+                self._clock() + (exc.retry_after_seconds or (60 if exc.sent else 30))
+                if safe_retry else None
             )
             self.store.mark_error(
                 session.session_id, self.owner, code=exc.code,
-                retryable=exc.retryable and not ambiguous and not exc.sent, retry_at=retry_at,
+                retryable=safe_retry, retry_at=retry_at,
                 reconciliation_required=ambiguous,
             )
         except VoiceIntakeError as exc:
