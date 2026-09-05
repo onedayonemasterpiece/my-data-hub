@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Badge from '../../components/Badge.astro';
+import CardChips from '../../components/CardChips.astro';
 import ContactFooter from '../../components/ContactFooter.astro';
 import InterestButton from '../../components/InterestButton.astro';
 import ShareButton from '../../components/ShareButton.astro';
@@ -17,9 +18,10 @@ const status = maturityLabel(item.maturity);
       <div class="idea-card__heading"><span class="card-number">#{item.display_number || index + 1}</span><Badge label={status.label} tone={status.tone} /></div>
       <h1>{item.title}</h1>
       <p>{item.summary}</p>
-      <p class="card-audience">{item.for_whom.join(' · ')}</p>
+      <CardChips item={item} />
     </article>
     <section class="detail-section"><h2>Что вы получите</h2><p>{item.benefit}</p></section>
+    <section class="detail-section"><h2>Для кого</h2><ul>{item.for_whom.map((value) => <li>{value}</li>)}</ul></section>
     <section class="detail-section"><h2>Что потребуется от вас</h2><ul>{item.requirements.map((value) => <li>{value}</li>)}</ul></section>
     <section class="detail-section"><h2>Что уже проверено</h2><ul>{item.available.map((value) => <li>{value}</li>)}</ul></section>
     <div class="detail-actions"><InterestButton id={item.id} title={item.title}/><ShareButton title={item.title} text={item.summary} image={cardImage(item.id)} url={cardPath(item.id)} /></div>
