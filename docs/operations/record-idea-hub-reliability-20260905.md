@@ -2,7 +2,7 @@
 
 Status: source implementation; deployment and physical acceptance are separate gates.
 Base: b816f9a5c6f3d166c17b5c2c31110896e40241e2.
-Companion Android branch: `onedayonemasterpiece/record-idea-hub`, `fix/reliable-delivery-20260905`.
+Companion Android PR: `onedayonemasterpiece/record-idea-hub#5`.
 
 ## Changed contract
 
@@ -10,9 +10,17 @@ A successfully accepted complete manifest transfers ownership of processing to t
 server. The phone may disconnect. Pre-send transient failures, publication
 retries and audio-purge retries have durable server deadlines (30 seconds by
 default, or the specified provider/limiter delay). Repeating complete
-is idempotent transport, NOT permission to repeat a paid inference. Ambiguous
-or already-sent failures without a usable response remain fenced and require
-an explicitly reviewed recovery. There is no new automatic paid-retry endpoint.
+is idempotent transport, NOT permission to repeat a paid inference. Unknown
+or unusable generation outcomes remain fenced and require explicitly reviewed
+recovery. There is no new automatic paid-retry endpoint.
+
+A received and successfully accounted HTTP 429 is a known quota rejection, not
+an unknown generation outcome. It waits at least the default 60 seconds when
+no other delay was provided, then passes the shared limiter again. There is no
+immediate in-adapter retry. If accounting itself failed or the outcome is
+ambiguous, even a quota-related error remains fenced. Tests prove both cases.
+Every physical request still gets its own accounting; two successful requests
+is the normal no-error path, not a claim that rejected attempts never occur.
 
 The `client_version` field is telemetry. Reopening a legacy session after an APK
 upgrade may change this field only; stored original metadata and hash are kept.
@@ -50,10 +58,11 @@ source audio.
 The regression suite exercises APK metadata compatibility, autonomous purge,
 idempotent complete without paid consent, the transcript/summary crash gap,
 response recovery after SQLite failure, accounting recovery without a second
-provider POST, corrupt/foreign receipts, expired owners, low disk and quota
-preflight. Existing synthetic M4A/FFmpeg, two-request aggregate, publication and
-retention tests remain part of acceptance. Tests use fakes; no real Gemini call
-or production mutation is required.
+provider POST, corrupt/foreign receipts, expired owners, low disk, quota
+preflight and explicit versus ambiguous quota rejection. Existing synthetic
+M4A/FFmpeg, two-request aggregate, publication and retention tests remain part
+of acceptance. Tests use fakes; no real Gemini call or production mutation is
+required.
 
 ## Rollout gates (not performed by this source change)
 
