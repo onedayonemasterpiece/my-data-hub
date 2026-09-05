@@ -110,7 +110,7 @@ def matching_complete(store, complete_request) -> SessionCompleteRequest:
 
 
 @pytest.mark.asyncio
-async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized_diagnostics(
+async def test_sent_truncation_does_not_treat_duplicate_complete_as_consent_and_logs_safely(
     tmp_path, create_request, complete_request, terminology, caplog
 ):
     class RetryTruncatedInference(Inference):
@@ -164,16 +164,15 @@ async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized
     assert await worker.process_once()
     failed = store.status(SESSION_ID)
     assert failed.state == "retryable_error"
-    assert failed.retryable and failed.retry_at is None
+    assert not failed.retryable and failed.retry_at is None
     assert [call[0] for call in inference.calls] == ["transcribe"]
     assert "finish_reason=MAX_TOKENS" in caplog.text
     assert "configured_max_output_tokens=65536" in caplog.text
     assert "PRIVATE" not in caplog.text
 
     store.complete(SESSION_ID, matching_complete(store, complete_request))
-    assert await worker.process_once()
-    assert store.status(SESSION_ID).state == "published_verified"
-    assert [call[0] for call in inference.calls] == ["transcribe", "transcribe", "summarize"]
+    assert not await worker.process_once()
+    assert [call[0] for call in inference.calls] == ["transcribe"]
 
 
 @pytest.mark.asyncio
@@ -369,7 +368,11 @@ async def test_github_retry_reuses_durable_inference_without_new_provider_calls(
     assert failed.transcription_complete and failed.summary_complete
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
 
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
+    # No new request from the phone: the server owns the retry deadline.
+    from datetime import datetime
+    deadline = datetime.fromisoformat(store.status(SESSION_ID).retry_at).timestamp() + 1
+    store._clock = lambda: deadline
+    worker._clock = lambda: deadline
     assert await worker.process_once()
     assert store.status(SESSION_ID).state == "published_verified"
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
@@ -402,7 +405,11 @@ async def test_summary_retry_reuses_durable_transcript_without_new_transcription
     assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
 
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
+    # No new request from the phone: the server owns the retry deadline.
+    from datetime import datetime
+    deadline = datetime.fromisoformat(store.status(SESSION_ID).retry_at).timestamp() + 1
+    store._clock = lambda: deadline
+    worker._clock = lambda: deadline
     assert await worker.process_once()
     assert store.status(SESSION_ID).state == "published_verified"
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize", "summarize"]
@@ -431,7 +438,11 @@ async def test_failed_audio_deletion_never_marks_server_audio_purged(
     assert status.retryable
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
     monkeypatch.undo()
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
+    # No new request from the phone: the server owns the retry deadline.
+    from datetime import datetime
+    deadline = datetime.fromisoformat(store.status(SESSION_ID).retry_at).timestamp() + 1
+    store._clock = lambda: deadline
+    worker._clock = lambda: deadline
     assert await worker.process_once()
     recovered = store.status(SESSION_ID)
     assert recovered.state == "published_verified" and recovered.server_audio_purged

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
+import shutil
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -14,6 +14,13 @@ from uuid import uuid4
 
 from my_data_hub.voice_intake.errors import VoiceIntakeError
 
+from .checkpoint import (
+    AccountingPending,
+    CheckpointError,
+    StageCheckpoint,
+    atomic_json,
+    fingerprint,
+)
 from .contracts import InferenceReceipt, PublicationReceipt
 from .media import BoundedMediaTools, MediaError
 from .settings import VoiceIntakeV2Settings
@@ -41,36 +48,18 @@ class StageFailure(RuntimeError):
 
 class AggregateInference(Protocol):
     async def transcribe(
-        self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any]
+        self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any],
+        checkpoint: StageCheckpoint | None = None,
     ) -> InferenceReceipt: ...
 
     async def summarize(
-        self, *, transcript: dict[str, Any], terminology: dict[str, Any]
+        self, *, transcript: dict[str, Any], terminology: dict[str, Any],
+        checkpoint: StageCheckpoint | None = None,
     ) -> InferenceReceipt: ...
 
 
 class SessionPublisher(Protocol):
     async def publish_and_verify(self, projection: PublicationProjection) -> PublicationReceipt: ...
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 class VoiceIntakeV2Worker:
@@ -110,8 +99,11 @@ class VoiceIntakeV2Worker:
 
     async def run(self) -> None:
         while not self._stop.is_set():
-            with suppress(Exception):
+            try:
                 await self.process_once()
+            except Exception as exc:
+                # Never log exception messages or tracebacks containing dictated text.
+                LOGGER.error("voice_v2_worker_failure type=%s", type(exc).__name__)
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self.settings.worker_poll_seconds)
 
@@ -121,6 +113,7 @@ class VoiceIntakeV2Worker:
         session = self.store.claim(self.owner, self.settings.lease_seconds)
         if session is None:
             return False
+        heartbeat = asyncio.create_task(self._heartbeat(session.session_id))
         try:
             await self._process(session)
         except StageFailure as exc:
@@ -146,20 +139,25 @@ class VoiceIntakeV2Worker:
                     diagnostic.get("truncated"),
                 )
             ambiguous = exc.ambiguous
+            # A received/finalized 429 is a known quota rejection, not an
+            # unknown generation outcome. Keep it recoverable through the
+            # shared limiter; no immediate retry occurs inside the adapter.
+            safe_retry = exc.retryable and not ambiguous and (
+                not exc.sent or exc.code == "provider_429"
+            )
             retry_at = (
-                self._clock() + exc.retry_after_seconds
-                if not exc.sent and exc.retryable and exc.retry_after_seconds else None
+                self._clock() + (exc.retry_after_seconds or (60 if exc.sent else 30))
+                if safe_retry else None
             )
             self.store.mark_error(
                 session.session_id, self.owner, code=exc.code,
-                retryable=exc.retryable and not ambiguous, retry_at=retry_at,
+                retryable=safe_retry, retry_at=retry_at,
                 reconciliation_required=ambiguous,
             )
         except VoiceIntakeError as exc:
             retry_at = (
-                self._clock() + exc.retry_after_seconds
-                if exc.retryable and exc.retry_after_seconds
-                else None
+                self._clock() + (exc.retry_after_seconds or 30)
+                if exc.retryable and not exc.reconciliation_required else None
             )
             self.store.mark_error(
                 session.session_id,
@@ -174,61 +172,126 @@ class VoiceIntakeV2Worker:
                 session.session_id, self.owner, code=str(exc), retryable=False,
                 reconciliation_required=False,
             )
+        except AccountingPending:
+            self.store.mark_error(
+                session.session_id, self.owner, code="receipt_accounting_pending",
+                retryable=True, retry_at=self._clock() + 30,
+            )
+        except CheckpointError:
+            self.store.mark_error(
+                session.session_id, self.owner, code="checkpoint_invalid", retryable=False,
+                reconciliation_required=True,
+            )
         except StoreError as exc:
             # The verified GitHub receipt is already durable when an ordinary
             # filesystem deletion fails. Expose an explicit retry path without
             # repeating either inference stage or claiming that audio vanished.
+            if exc.code == "worker_lease_lost":
+                return True
             retryable = exc.code == "server_audio_purge_failed"
             self.store.mark_error(
                 session.session_id, self.owner, code=exc.code, retryable=retryable,
+                retry_at=self._clock() + 30 if retryable else None,
                 reconciliation_required=False,
             )
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
         return True
+
+    async def _heartbeat(self, session_id: str) -> None:
+        while True:
+            await asyncio.sleep(self.settings.lease_seconds / 3)
+            try:
+                self.store.renew_lease(session_id, self.owner, self.settings.lease_seconds)
+            except Exception as exc:
+                LOGGER.error("voice_v2_lease_renewal_failure session_id=%s type=%s",
+                             session_id, type(exc).__name__)
+                return
+
+    def _checkpoint(self, session: ClaimedSession, stage: str) -> StageCheckpoint:
+        return StageCheckpoint(
+            self.store.session_directory(session.session_id), session.session_id,
+            stage, fingerprint(session.complete),
+            lambda: self.store.set_state(session.session_id, self.owner,
+                                        "transcribing" if stage == "transcript" else "summarizing"),
+        )
+
+    async def _restore(self, checkpoint: StageCheckpoint) -> InferenceReceipt | None:
+        saved = checkpoint.load()
+        if saved is None:
+            return None
+        receipt, accounting = saved
+        if accounting is not None:
+            resume = getattr(self.inference, "resume_receipt", None)
+            if resume is None:
+                raise CheckpointError("accounting_recovery_unavailable")
+            await resume(checkpoint)
+        return receipt
+
+    def _require_capacity(self) -> None:
+        if shutil.disk_usage(self.store.root).free < 64 * 1024 * 1024 + 4 * self.settings.max_json_bytes:
+            raise StageFailure("spool_capacity_low", sent=False, retryable=True, retry_after_seconds=60)
 
     async def _process(self, session: ClaimedSession) -> None:
         directory = self.store.session_directory(session.session_id)
+        if session.github_verified:
+            self.store.renew_lease(session.session_id, self.owner, self.settings.lease_seconds)
+            self.store.purge_audio(session.session_id)
+            self.store.finish_purge(session.session_id, self.owner)
+            return
         normalized = directory / "normalized" / "session.mp3"
         transcript = session.transcript
         summary = session.summary
         if transcript is None:
-            paths: list[Path] = []
-            for chunk in session.chunks:
-                path = Path(chunk.path)
-                if path.resolve().parent != (directory / "chunks").resolve():
-                    raise MediaError("audio_path_invalid")
-                digest = hashlib.sha256()
-                observed_size = 0
-                try:
-                    with path.open("rb") as handle:
-                        while block := handle.read(1024 * 1024):
-                            observed_size += len(block)
-                            if observed_size > self.settings.max_chunk_bytes:
-                                raise MediaError("audio_receipt_mismatch")
-                            digest.update(block)
-                except OSError as exc:
-                    raise MediaError("audio_receipt_mismatch") from exc
-                if observed_size != chunk.size_bytes or digest.hexdigest() != chunk.sha256:
-                    raise MediaError("audio_receipt_mismatch")
-                probe = await self.media.probe(path)
-                if abs(probe.duration_ms - chunk.duration_ms) > self.settings.duration_tolerance_ms:
-                    raise MediaError("audio_duration_mismatch")
-                paths.append(path)
-            await self.media.normalize(tuple(paths), normalized)
-            self.store.set_state(session.session_id, self.owner, "transcribing")
-            receipt = await self.inference.transcribe(
-                audio_path=normalized,
-                recorded_audio_ms=session.complete["recorded_audio_ms"],
-                terminology=session.terminology,
-            )
-            _atomic_json(directory / "transcript.json", receipt.value)
+            checkpoint = self._checkpoint(session, "transcript")
+            receipt = await self._restore(checkpoint)
+            if receipt is None:
+                self._require_capacity()
+                paths: list[Path] = []
+                for chunk in session.chunks:
+                    path = Path(chunk.path)
+                    if path.resolve().parent != (directory / "chunks").resolve():
+                        raise MediaError("audio_path_invalid")
+                    digest = hashlib.sha256()
+                    observed_size = 0
+                    try:
+                        with path.open("rb") as handle:
+                            while block := handle.read(1024 * 1024):
+                                observed_size += len(block)
+                                if observed_size > self.settings.max_chunk_bytes:
+                                    raise MediaError("audio_receipt_mismatch")
+                                digest.update(block)
+                    except OSError as exc:
+                        raise MediaError("audio_receipt_mismatch") from exc
+                    if observed_size != chunk.size_bytes or digest.hexdigest() != chunk.sha256:
+                        raise MediaError("audio_receipt_mismatch")
+                    probe = await self.media.probe(path)
+                    if abs(probe.duration_ms - chunk.duration_ms) > self.settings.duration_tolerance_ms:
+                        raise MediaError("audio_duration_mismatch")
+                    paths.append(path)
+                await self.media.normalize(tuple(paths), normalized)
+                receipt = await self.inference.transcribe(
+                    audio_path=normalized, recorded_audio_ms=session.complete["recorded_audio_ms"],
+                    terminology=session.terminology, checkpoint=checkpoint,
+                )
+                checkpoint.save(receipt)
+            atomic_json(directory / "transcript.json", receipt.value)
             self.store.persist_transcript(
                 session.session_id, self.owner, receipt.value, receipt.request_uid, receipt.limiter
             )
             transcript = receipt.value
         if summary is None:
-            self.store.set_state(session.session_id, self.owner, "summarizing")
-            receipt = await self.inference.summarize(transcript=transcript, terminology=session.terminology)
-            _atomic_json(directory / "summary.json", receipt.value)
+            checkpoint = self._checkpoint(session, "summary")
+            receipt = await self._restore(checkpoint)
+            if receipt is None:
+                self._require_capacity()
+                receipt = await self.inference.summarize(
+                    transcript=transcript, terminology=session.terminology, checkpoint=checkpoint,
+                )
+                checkpoint.save(receipt)
+            atomic_json(directory / "summary.json", receipt.value)
             self.store.persist_summary(
                 session.session_id, self.owner, receipt.value, receipt.request_uid, receipt.limiter
             )
