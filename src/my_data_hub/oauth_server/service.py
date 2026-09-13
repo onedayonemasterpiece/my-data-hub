@@ -200,9 +200,13 @@ class AuthorizationService:
         redirect_uri = parameters["redirect_uri"]
         if redirect_uri not in configured.redirect_uris:
             raise OAuthProtocolError("invalid_request")
-        if parameters["resource"] != self.settings.resource:
+        resource = parameters["resource"]
+        if resource not in self.settings.resources_supported:
             raise OAuthProtocolError("invalid_target")
-        if "audience" in parameters and parameters["audience"] != self.settings.audience:
+        if (
+            "audience" in parameters
+            and parameters["audience"] != self.settings.audience_for_resource(resource)
+        ):
             raise OAuthProtocolError("invalid_target")
         try:
             scopes = parse_scope(parameters["scope"])
@@ -223,7 +227,7 @@ class AuthorizationService:
         return ValidatedAuthorizationRequest(
             client=configured,
             redirect_uri=redirect_uri,
-            resource=self.settings.resource,
+            resource=resource,
             scopes=scopes,
             state=state,
             nonce=nonce,
@@ -284,9 +288,13 @@ class AuthorizationService:
         if not _bounded_credential(code) or not validate_pkce_value(verifier):
             raise OAuthProtocolError("invalid_grant")
         configured, ledger_client = await self._enabled_client(parameters["client_id"])
-        if parameters["resource"] != self.settings.resource:
+        resource = parameters["resource"]
+        if resource not in self.settings.resources_supported:
             raise OAuthProtocolError("invalid_target")
-        if "audience" in parameters and parameters["audience"] != self.settings.audience:
+        if (
+            "audience" in parameters
+            and parameters["audience"] != self.settings.audience_for_resource(resource)
+        ):
             raise OAuthProtocolError("invalid_target")
         now = int(self.clock())
         grant = await _invoke(
@@ -319,6 +327,7 @@ class AuthorizationService:
             client_id=grant.client_id,
             scopes=grant.scopes,
             now=now,
+            resource=grant.resource,
         )
         response["refresh_token"] = refresh_token
         if "openid" in grant.scopes:
@@ -352,7 +361,13 @@ class AuthorizationService:
         raise OAuthProtocolError("temporarily_unavailable", status_code=503)
 
     def _access_response(
-        self, *, subject: str, client_id: str, scopes: tuple[str, ...], now: int
+        self,
+        *,
+        subject: str,
+        client_id: str,
+        scopes: tuple[str, ...],
+        now: int,
+        resource: str,
     ) -> dict[str, object]:
         token, _ = self.jwt.issue_access_token(
             subject=subject,
@@ -360,6 +375,8 @@ class AuthorizationService:
             scopes=scopes,
             token_id=secrets.token_urlsafe(18),
             now=now,
+            audience=self.settings.audience_for_resource(resource),
+            resource=resource,
         )
         return {
             "access_token": token,
@@ -376,9 +393,13 @@ class AuthorizationService:
         if not _bounded_credential(presented):
             raise OAuthProtocolError("invalid_grant")
         configured, ledger_client = await self._enabled_client(parameters["client_id"])
-        if parameters["resource"] != self.settings.resource:
+        resource = parameters["resource"]
+        if resource not in self.settings.resources_supported:
             raise OAuthProtocolError("invalid_target")
-        if "audience" in parameters and parameters["audience"] != self.settings.audience:
+        if (
+            "audience" in parameters
+            and parameters["audience"] != self.settings.audience_for_resource(resource)
+        ):
             raise OAuthProtocolError("invalid_target")
         requested_scopes: tuple[str, ...] | None = None
         if "scope" in parameters:
@@ -411,6 +432,7 @@ class AuthorizationService:
             client_id=rotation.grant.client_id,
             scopes=rotation.grant.scopes,
             now=now,
+            resource=rotation.grant.resource,
         )
         response["refresh_token"] = successor
         return response

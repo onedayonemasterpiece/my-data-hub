@@ -746,6 +746,8 @@ services:
     environment:
       MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"
       MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,provider:write
+      MY_DATA_HUB_OAUTH_ADDITIONAL_RESOURCES: https://mcp-dataset-loop.kenigevents.ru/mcp
+      MY_DATA_HUB_OAUTH_CHATGPT_EXTRA_SCOPES: artifacts:read,runs:read,runs:write
 YAML
   chmod 600 "$unified_bootstrap_override"
   unified_bootstrap_compose_arg=" -f $unified_bootstrap_override"

@@ -26,3 +26,9 @@ Provider-only deployment enables CIMD with exactly `openid`, `offline_access`,
 `platform:read`, `provider:read`, and `provider:write`. The existing static client path
 remains ledger-gated and compatible. No live OAuth or deployment mutation was performed
 as part of this implementation.
+
+The unified bootstrap deployment additionally authorizes the distinct resource
+`https://mcp-dataset-loop.kenigevents.ru/mcp` for ChatGPT CIMD clients. That resource is
+limited to `artifacts:read`, `runs:read`, and `runs:write`. Issued access tokens bind both
+`aud` and `resource` to the Dataset Loop URL, preventing replay against the My Data Hub
+MCP. Preserve this resource and its bounded scopes in future shared-issuer deployments.
