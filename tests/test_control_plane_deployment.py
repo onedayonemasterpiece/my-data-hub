@@ -526,6 +526,14 @@ def test_unified_bootstrap_action_combines_master_runtime_provider_and_bounded_r
     assert (
         "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access," + exact_scopes
     ) in override
+    assert (
+        "MY_DATA_HUB_OAUTH_ADDITIONAL_RESOURCES: "
+        "https://mcp-dataset-loop.kenigevents.ru/mcp"
+    ) in override
+    assert (
+        "MY_DATA_HUB_OAUTH_CHATGPT_EXTRA_SCOPES: "
+        "artifacts:read,runs:read,runs:write"
+    ) in override
     assert 'unified_bootstrap_compose_arg=" -f $unified_bootstrap_override"' in source
 
 
