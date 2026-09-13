@@ -101,14 +101,16 @@ class JwtIssuer:
         scopes: tuple[str, ...],
         token_id: str,
         now: int,
+        audience: str | None = None,
+        resource: str | None = None,
     ) -> tuple[str, int]:
         expires_at = now + self.access_token_ttl_seconds
         token = jwt.encode(
             {
                 "iss": self.issuer,
                 "sub": subject,
-                "aud": self.audience,
-                "resource": self.resource,
+                "aud": audience or self.audience,
+                "resource": resource or self.resource,
                 "client_id": client_id,
                 "scope": " ".join(scopes),
                 "jti": token_id,

@@ -17,7 +17,7 @@ from .app import OAuthHTTPPolicy, create_authorization_app
 from .client_metadata import ChatGPTClientMetadataResolver
 from .control_store import ControlLedgerOAuthGrantStore
 from .local_owner import LocalOwnerTokenAuthenticator, LocalOwnerTokenPortal
-from .models import AuthorizationServerSettings, StaticClient
+from .models import AuthorizationServerSettings, StaticClient, valid_scope
 from .owner_oidc import OIDCSessionOwnerAuthenticator
 from .owner_portal import OIDCLoginPortal
 from .service import AuthorizationService
@@ -134,6 +134,9 @@ def build_authorization_runtime() -> AuthorizationRuntime:
     key_path = Path(_required("MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE"))
     if key_path.is_symlink() or not key_path.is_file() or key_path.stat().st_mode & 0o077:
         raise RuntimeError("OAuth signing key must be a private regular file")
+    additional_resources = frozenset(
+        _csv("MY_DATA_HUB_OAUTH_ADDITIONAL_RESOURCES", (), maximum_values=8)
+    )
     settings = AuthorizationServerSettings(
         issuer=issuer,
         resource=_required("MY_DATA_HUB_MCP_OAUTH_RESOURCE"),
@@ -142,6 +145,7 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         clients=_clients(_required("MY_DATA_HUB_OAUTH_CLIENTS_JSON")),
         signing_key_pem=key_path.read_bytes(),
         signing_key_id=_required("MY_DATA_HUB_OAUTH_SIGNING_KEY_ID"),
+        additional_resources=additional_resources,
         overlap_public_jwks=_overlap_public_jwks(),
     )
     issuer = settings.issuer
@@ -167,9 +171,17 @@ def build_authorization_runtime() -> AuthorizationRuntime:
                 maximum_values=len(ALL_SCOPES | {"openid", "offline_access"}),
             )
         )
-        if not cimd_scopes or not cimd_scopes.issubset(ALL_SCOPES | {"openid", "offline_access"}):
+        allowed_base = ALL_SCOPES | {"openid", "offline_access"}
+        if not cimd_scopes or not cimd_scopes.issubset(allowed_base):
             raise RuntimeError("ChatGPT CIMD scopes must be an explicit bounded OAuth subset")
-        client_metadata_resolver = ChatGPTClientMetadataResolver(allowed_scopes=cimd_scopes)
+        extra_scopes = frozenset(
+            _csv("MY_DATA_HUB_OAUTH_CHATGPT_EXTRA_SCOPES", (), maximum_values=32)
+        )
+        if any(not valid_scope(scope) for scope in extra_scopes):
+            raise RuntimeError("ChatGPT CIMD extra scope is invalid")
+        client_metadata_resolver = ChatGPTClientMetadataResolver(
+            allowed_scopes=cimd_scopes | extra_scopes
+        )
     service = AuthorizationService(
         settings=settings,
         control_ledger=authority,

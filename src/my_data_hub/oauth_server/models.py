@@ -108,6 +108,7 @@ class AuthorizationServerSettings:
     clients: tuple[StaticClient, ...]
     signing_key_pem: bytes
     signing_key_id: str
+    additional_resources: frozenset[str] = frozenset()
     overlap_public_jwks: tuple[Mapping[str, object], ...] = ()
     access_token_ttl_seconds: int = 300
     authorization_code_ttl_seconds: int = 180
@@ -117,6 +118,10 @@ class AuthorizationServerSettings:
         object.__setattr__(self, "issuer", _exact_https_url(self.issuer, root_only=True))
         _exact_https_url(self.resource)
         _exact_https_url(self.audience)
+        for resource in self.additional_resources:
+            _exact_https_url(resource)
+        if self.resource in self.additional_resources:
+            raise ValueError("primary resource cannot be duplicated in additional_resources")
         if not self.owner_subject or len(self.owner_subject) > 255:
             raise ValueError("one bounded owner subject is required")
         if not self.clients or len({client.client_id for client in self.clients}) != len(self.clients):
@@ -135,6 +140,17 @@ class AuthorizationServerSettings:
     @property
     def scopes_supported(self) -> frozenset[str]:
         return frozenset(scope for client in self.clients for scope in client.allowed_scopes)
+
+    @property
+    def resources_supported(self) -> frozenset[str]:
+        return frozenset({self.resource}) | self.additional_resources
+
+    def audience_for_resource(self, resource: str) -> str:
+        if resource == self.resource:
+            return self.audience
+        if resource in self.additional_resources:
+            return resource
+        raise ValueError("unsupported OAuth resource")
 
     def client(self, client_id: str) -> StaticClient | None:
         return next((client for client in self.clients if client.client_id == client_id), None)
