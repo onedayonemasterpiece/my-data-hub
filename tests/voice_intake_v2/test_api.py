@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from my_data_hub.voice_intake_v2.api import attach_voice_intake_v2_routes
-from my_data_hub.voice_intake_v2.media import MediaProbe
+from my_data_hub.voice_intake_v2.media import MediaError, MediaProbe
 from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
 from my_data_hub.voice_intake_v2.store import VoiceIntakeV2Store
 
@@ -238,6 +238,72 @@ def test_upload_rejects_traversal_and_cleans_oversized_stream_temporary_file(
     assert response.status_code == 413
     directory = app.state.voice_intake_v2_store.session_directory(SESSION_ID) / "chunks"
     assert list(directory.iterdir()) == []
+
+
+def test_ffprobe_timeout_is_retryable_and_never_requires_manual_reconciliation(
+    tmp_path, auth_settings, terminology, create_request
+):
+    client, media, app = build(tmp_path, auth_settings, terminology)
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+
+    attempts = 0
+
+    async def timeout(_path: Path) -> MediaProbe:
+        nonlocal attempts
+        attempts += 1
+        raise MediaError("ffprobe_timeout")
+
+    media.probe = timeout
+    audio = b"independent-m4a"
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0",
+        content=audio,
+        headers=headers(hashlib.sha256(audio).hexdigest()),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "api_version": "2.0",
+        "detail": {
+            "code": "audio_probe_temporarily_unavailable",
+            "retryable": True,
+            "retry_after_seconds": 5,
+            "reconciliation_required": False,
+        },
+    }
+    directory = app.state.voice_intake_v2_store.session_directory(SESSION_ID) / "chunks"
+    assert list(directory.iterdir()) == []
+    assert app.state.voice_intake_v2_store.status(SESSION_ID).state == "receiving"
+    assert attempts == 2
+
+
+def test_ffprobe_one_off_timeout_is_retried_server_side_without_reupload(
+    tmp_path, auth_settings, terminology, create_request
+):
+    client, media, _app = build(tmp_path, auth_settings, terminology)
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+    attempts = 0
+
+    async def transient_timeout(_path: Path) -> MediaProbe:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise MediaError("ffprobe_timeout")
+        return MediaProbe(240000, "aac", "LC", 16000, 1)
+
+    media.probe = transient_timeout
+    audio = b"independent-m4a"
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0",
+        content=audio,
+        headers=headers(hashlib.sha256(audio).hexdigest()),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert attempts == 2
 
 
 def test_router_lifespan_composes_with_existing_application_lifespan(

@@ -96,6 +96,12 @@ receipts. Required properties:
 - hashes are computed from actual body bytes; session IDs and indices are
   validated before path construction, with no path traversal;
 - ffprobe validates independent MP4/M4A, AAC-LC, mono, 16 kHz and duration;
+- an `ffprobe` deadline is a side-effect-free infrastructure timeout, not proof
+  of invalid audio: the server retries the same private temporary once and, if
+  the probe still times out, returns retryable HTTP `503`
+  `audio_probe_temporarily_unavailable` with a bounded retry delay and
+  `reconciliation_required=false`; it must never strand the Android queue in
+  manual reconciliation;
 - one bounded worker uses durable lease/CAS transitions so restart or duplicate
   wake-up cannot run the same stage concurrently;
 - startup recovers expired leases and unfinished durable states;

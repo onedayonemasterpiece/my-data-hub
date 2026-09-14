@@ -239,7 +239,27 @@ def attach_voice_intake_v2_routes(
             try:
                 probe = await tools.probe(temporary)
             except MediaError as exc:
-                return _error(422, exc.code)
+                # A local ffprobe deadline has no external side effect and the
+                # immutable temporary can be probed once more without making
+                # the phone upload it again.
+                if exc.code == "ffprobe_timeout":
+                    try:
+                        probe = await tools.probe(temporary)
+                    except MediaError as retry_exc:
+                        if retry_exc.code == "ffprobe_timeout":
+                            # Do not expose the historical ffprobe_timeout code
+                            # to older Android clients: releases through rc4
+                            # classified any non-retryable 422 as terminal
+                            # manual reconciliation.
+                            return _error(
+                                503,
+                                "audio_probe_temporarily_unavailable",
+                                retryable=True,
+                                retry_after_seconds=5,
+                            )
+                        return _error(422, retry_exc.code)
+                else:
+                    return _error(422, exc.code)
             if abs(probe.duration_ms - duration) > config.duration_tolerance_ms:
                 return _error(422, "audio_duration_mismatch")
             final = directory / f"{parsed_chunk_index:05d}-{chunk_sha256}.m4a"
