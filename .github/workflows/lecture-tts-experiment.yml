@@ -1,0 +1,98 @@
+name: Lecture TTS experiment
+
+on:
+  push:
+    branches:
+      - work/lecture-tts-20260915
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      HF_HOME: ${{ runner.temp }}/huggingface
+      TOKENIZERS_PARALLELISM: "false"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      NUMEXPR_NUM_THREADS: "4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner diagnostics
+        run: |
+          uname -a
+          nproc
+          free -h
+          df -h
+          python3 --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ffmpeg and CPU TTS runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+            torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+          python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1 kaggle==1.7.4.5
+          python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+
+      - name: Select safe CPU dtype
+        shell: bash
+        run: |
+          mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          echo "MemTotal kB: $mem_kb"
+          if [ "$mem_kb" -lt 12000000 ]; then
+            echo "TTS_DTYPE=bfloat16" >> "$GITHUB_ENV"
+          else
+            echo "TTS_DTYPE=float32" >> "$GITHUB_ENV"
+          fi
+
+      - name: Restore slide-only narration JSON
+        run: |
+          python - <<'PY'
+          import base64, zlib
+          from pathlib import Path
+          d = Path('experiments/lecture-tts-20260915')
+          raw = (d / 'lecture_script.json.zlib.b64').read_text(encoding='utf-8').strip()
+          out = zlib.decompress(base64.b64decode(raw))
+          (d / 'lecture_script.json').write_bytes(out)
+          print('script bytes', len(out))
+          PY
+
+      - name: Synthesize lecture MP3
+        run: |
+          python experiments/lecture-tts-20260915/run_longform.py run \
+            --script experiments/lecture-tts-20260915/lecture_script.json \
+            --workdir experiments/lecture-tts-20260915/tts_out \
+            --output lecture_computer_in_cube.mp3
+
+      - name: Final output summary
+        if: always()
+        run: |
+          find experiments/lecture-tts-20260915/tts_out -maxdepth 2 -type f -printf '%p %s bytes\n' 2>/dev/null | sort || true
+          if [ -f experiments/lecture-tts-20260915/tts_out/manifest.json ]; then
+            cat experiments/lecture-tts-20260915/tts_out/manifest.json
+          fi
+
+      - name: Upload TTS artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lecture-tts-computer-in-cube
+          path: |
+            experiments/lecture-tts-20260915/tts_out/lecture_computer_in_cube.mp3
+            experiments/lecture-tts-20260915/tts_out/manifest.json
+            experiments/lecture-tts-20260915/tts_out/manifest.partial.json
+            experiments/lecture-tts-20260915/tts_out/chunks.json
+          if-no-files-found: warn
+          retention-days: 7
