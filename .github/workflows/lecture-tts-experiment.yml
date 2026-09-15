@@ -16,6 +16,9 @@ jobs:
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
       NUMEXPR_NUM_THREADS: "4"
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +43,16 @@ jobs:
           python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
           python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1 kaggle
           python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+
+      - name: Kaggle credential preflight
+        run: |
+          python - <<'PY'
+          import os
+          present = {k: bool(os.environ.get(k, '').strip()) for k in ('KAGGLE_API_TOKEN','KAGGLE_USERNAME','KAGGLE_KEY')}
+          print('kaggle credential presence:', present)
+          if not (present['KAGGLE_API_TOKEN'] or (present['KAGGLE_USERNAME'] and present['KAGGLE_KEY'])):
+              raise SystemExit('No Kaggle credential is configured in GitHub Actions secrets')
+          PY
 
       - name: Select safe CPU dtype
         run: |
