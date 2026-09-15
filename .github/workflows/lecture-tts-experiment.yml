@@ -70,16 +70,16 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import hashlib, shutil
+          import base64, hashlib
           d = Path('experiments/lecture-tts-20260915')
-          src = d / 'reference_kazakova_10s.ogg'
-          assert src.is_file(), src
+          raw = ''.join((d / f'reference.part{i}.b64').read_text(encoding='utf-8').strip() for i in range(1, 7))
+          data = base64.b64decode(raw)
           expected = 'bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a'
-          actual = hashlib.sha256(src.read_bytes()).hexdigest()
-          print('voice reference bytes', src.stat().st_size, 'sha256', actual)
+          actual = hashlib.sha256(data).hexdigest()
+          print('voice reference chars', len(raw), 'bytes', len(data), 'sha256', actual)
           assert actual == expected, (actual, expected)
           dst = Path('audio_2026-09-02_15-37-11-kazakova.ogg')
-          shutil.copyfile(src, dst)
+          dst.write_bytes(data)
           gen = d / 'run_longform.py'
           text = gen.read_text(encoding='utf-8')
           text = text.replace(
