@@ -1,0 +1,110 @@
+name: Quantum lecture audible slide markers
+
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths:
+      - experiments/quantum-slide-cues-20260915/**
+      - .github/workflows/quantum-slide-announcements.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: quantum-slide-announcements-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  headers:
+    name: speak slide headers ${{ matrix.part }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      HF_HOME: /tmp/huggingface
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TTS_DTYPE: float32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-reviewed-inputs
+          run-id: 34979607472
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: experiments/quantum-slide-cues-20260915/inputs
+      - name: Verify reviewed script and prepare headers only
+        run: |
+          python -m py_compile experiments/quantum-slide-cues-20260915/annotate.py
+          python experiments/quantum-slide-cues-20260915/annotate.py prepare --root experiments/quantum-slide-cues-20260915
+      - name: Install the same CPU voice runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg sox
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+          python -m pip install --no-cache-dir numpy==1.26.4 scipy==1.11.4
+          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1
+          python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+      - name: Speak numbered titles with the original voice
+        run: |
+          python -u experiments/quantum-slide-cues-20260915/annotate.py synthesize \
+            --root experiments/quantum-slide-cues-20260915 \
+            --worker experiments/lecture-tts-20260915/longform_shard.py \
+            --shard ${{ matrix.part }} --count 8
+      - name: Save header WAVs and receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-slide-headers-${{ matrix.part }}
+          path: experiments/quantum-slide-cues-20260915/part-${{ matrix.part }}
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: insert headers and verify unchanged lecture
+    needs: headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-reviewed-inputs
+          run-id: 34979607472
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: experiments/quantum-slide-cues-20260915/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-lecture-expanded-v2-reviewed-final
+          run-id: 34979607472
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: experiments/quantum-slide-cues-20260915/base
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-slide-headers-*
+          path: experiments/quantum-slide-cues-20260915/announcements
+          merge-multiple: true
+      - name: Install encoder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+      - name: Insert all 29 headers without regenerating narration
+        run: python experiments/quantum-slide-cues-20260915/annotate.py assemble --root experiments/quantum-slide-cues-20260915
+      - name: Deliver numbered MP3 and separate slides
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-lecture-with-audible-slide-numbers
+          path: experiments/quantum-slide-cues-20260915/final
+          if-no-files-found: error
+          retention-days: 14
