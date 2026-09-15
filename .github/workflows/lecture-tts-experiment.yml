@@ -6,8 +6,16 @@ on:
       - work/lecture-tts-20260915
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  tts:
+  synthesize:
+    name: synthesize shard ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
@@ -16,8 +24,13 @@ jobs:
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
       NUMEXPR_NUM_THREADS: "4"
+      TTS_DTYPE: float32
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Runner diagnostics
         run: |
@@ -25,13 +38,9 @@ jobs:
           nproc
           free -h
           df -h
-          python3 --version
+          python --version
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install ffmpeg and CPU TTS runtime
+      - name: Install CPU TTS runtime
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
@@ -41,76 +50,83 @@ jobs:
           python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1
           python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
 
-      - name: Select safe CPU dtype
-        run: |
-          mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-          echo "MemTotal kB: $mem_kb"
-          if [ "$mem_kb" -lt 12000000 ]; then
-            echo "TTS_DTYPE=bfloat16" >> "$GITHUB_ENV"
-          else
-            echo "TTS_DTYPE=float32" >> "$GITHUB_ENV"
-          fi
-
-      - name: Restore slide-only narration JSON
+      - name: Reconstruct exact inputs
         run: |
           python - <<'PY'
           import base64, hashlib, zlib
           from pathlib import Path
           d = Path('experiments/lecture-tts-20260915')
-          raw = ''.join((d / f'script.part{i}.b64').read_text(encoding='utf-8').strip() for i in range(1, 5))
-          out = zlib.decompress(base64.b64decode(raw))
-          expected = 'ef5e1b65ab2d61849b24227b666a4148a59854e3106cf560d70913b1e643ff1a'
-          actual = hashlib.sha256(out).hexdigest()
-          print('compressed chars', len(raw), 'script bytes', len(out), 'sha256', actual)
-          assert actual == expected, (actual, expected)
-          (d / 'lecture_script.json').write_bytes(out)
-          PY
 
-      - name: Prepare local voice reference
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import base64, hashlib
-          d = Path('experiments/lecture-tts-20260915')
-          raw = ''.join((d / f'reference.part{i}.b64').read_text(encoding='utf-8').strip() for i in range(1, 7))
-          data = base64.b64decode(raw)
-          expected = 'bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a'
-          actual = hashlib.sha256(data).hexdigest()
-          print('voice reference chars', len(raw), 'bytes', len(data), 'sha256', actual)
-          assert actual == expected, (actual, expected)
-          dst = Path('audio_2026-09-02_15-37-11-kazakova.ogg')
-          dst.write_bytes(data)
-          gen = d / 'run_longform.py'
-          text = gen.read_text(encoding='utf-8')
-          text = text.replace(
-              'EXPECTED_SOURCE_SHA256 = "4a4d1732ae7a5b6ed7564639196665b512381b76ef72417896d8638caad27228"',
-              'EXPECTED_SOURCE_SHA256 = "bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a"',
-          )
-          gen.write_text(text, encoding='utf-8')
+          script_raw = ''.join((d / f'script.part{i}.b64').read_text(encoding='utf-8').strip() for i in range(1, 5))
+          script = zlib.decompress(base64.b64decode(script_raw))
+          script_sha = hashlib.sha256(script).hexdigest()
+          assert script_sha == 'ef5e1b65ab2d61849b24227b666a4148a59854e3106cf560d70913b1e643ff1a', script_sha
+          (d / 'lecture_script.json').write_bytes(script)
+
+          ref_raw = ''.join((d / f'reference.part{i}.b64').read_text(encoding='utf-8').strip() for i in range(1, 7))
+          reference = base64.b64decode(ref_raw)
+          ref_sha = hashlib.sha256(reference).hexdigest()
+          assert ref_sha == 'bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a', ref_sha
+          (d / 'reference_kazakova_10s_exact.ogg').write_bytes(reference)
+          print('script', len(script), script_sha)
+          print('reference', len(reference), ref_sha)
           PY
 
       - name: Validate generator syntax
-        run: |
-          python experiments/lecture-tts-20260915/fix_generator.py experiments/lecture-tts-20260915/run_longform.py
+        run: python -m py_compile experiments/lecture-tts-20260915/longform_shard.py
 
-      - name: Synthesize lecture MP3
+      - name: Synthesize shard
         run: |
-          python experiments/lecture-tts-20260915/run_longform.py run \
+          python experiments/lecture-tts-20260915/longform_shard.py \
             --script experiments/lecture-tts-20260915/lecture_script.json \
-            --workdir experiments/lecture-tts-20260915/tts_out \
-            --output lecture_computer_in_cube.mp3
+            --reference experiments/lecture-tts-20260915/reference_kazakova_10s_exact.ogg \
+            --output-dir experiments/lecture-tts-20260915/tts_shard_${{ matrix.shard }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 6
 
-      - name: Final output summary
-        if: ${{ always() }}
-        run: |
-          find experiments/lecture-tts-20260915/tts_out -maxdepth 2 -type f -printf '%p %s bytes\n' 2>/dev/null | sort || true
-          if [ -f experiments/lecture-tts-20260915/tts_out/manifest.json ]; then cat experiments/lecture-tts-20260915/tts_out/manifest.json; fi
-
-      - name: Upload TTS artifact
+      - name: Upload shard
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: lecture-tts-computer-in-cube
-          path: experiments/lecture-tts-20260915/tts_out
-          if-no-files-found: warn
+          name: lecture-tts-shard-${{ matrix.shard }}
+          path: experiments/lecture-tts-20260915/tts_shard_${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: assemble final MP3
+    needs: synthesize
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Download all shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lecture-tts-shard-*
+          path: experiments/lecture-tts-20260915/tts_all
+          merge-multiple: true
+
+      - name: Assemble and verify MP3
+        run: |
+          python experiments/lecture-tts-20260915/assemble_longform.py \
+            --input-dir experiments/lecture-tts-20260915/tts_all \
+            --output experiments/lecture-tts-20260915/final/lecture_computer_in_cube.mp3 \
+            --expected-chunks 53
+
+      - name: Upload final MP3
+        uses: actions/upload-artifact@v4
+        with:
+          name: lecture-tts-computer-in-cube-final
+          path: |
+            experiments/lecture-tts-20260915/final/lecture_computer_in_cube.mp3
+            experiments/lecture-tts-20260915/final/final-manifest.json
+          if-no-files-found: error
           retention-days: 7
