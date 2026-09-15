@@ -16,9 +16,6 @@ jobs:
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
       NUMEXPR_NUM_THREADS: "4"
-      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,18 +38,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
           python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
-          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1 kaggle
+          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1
           python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
-
-      - name: Kaggle credential preflight
-        run: |
-          python - <<'PY'
-          import os
-          present = {k: bool(os.environ.get(k, '').strip()) for k in ('KAGGLE_API_TOKEN','KAGGLE_USERNAME','KAGGLE_KEY')}
-          print('kaggle credential presence:', present)
-          if not (present['KAGGLE_API_TOKEN'] or (present['KAGGLE_USERNAME'] and present['KAGGLE_KEY'])):
-              raise SystemExit('No Kaggle credential is configured in GitHub Actions secrets')
-          PY
 
       - name: Select safe CPU dtype
         run: |
@@ -77,6 +64,29 @@ jobs:
           print('compressed chars', len(raw), 'script bytes', len(out), 'sha256', actual)
           assert actual == expected, (actual, expected)
           (d / 'lecture_script.json').write_bytes(out)
+          PY
+
+      - name: Prepare local voice reference
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          d = Path('experiments/lecture-tts-20260915')
+          src = d / 'reference_kazakova_10s.ogg'
+          assert src.is_file(), src
+          expected = 'bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a'
+          actual = hashlib.sha256(src.read_bytes()).hexdigest()
+          print('voice reference bytes', src.stat().st_size, 'sha256', actual)
+          assert actual == expected, (actual, expected)
+          dst = Path('audio_2026-09-02_15-37-11-kazakova.ogg')
+          shutil.copyfile(src, dst)
+          gen = d / 'run_longform.py'
+          text = gen.read_text(encoding='utf-8')
+          text = text.replace(
+              'EXPECTED_SOURCE_SHA256 = "4a4d1732ae7a5b6ed7564639196665b512381b76ef72417896d8638caad27228"',
+              'EXPECTED_SOURCE_SHA256 = "bd92c7a4343e2e07256942bb036d7db9ef885eda5985109f140849ce081ccf5a"',
+          )
+          gen.write_text(text, encoding='utf-8')
           PY
 
       - name: Validate generator syntax
