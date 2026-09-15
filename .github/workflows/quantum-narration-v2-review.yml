@@ -1,0 +1,120 @@
+name: Quantum lecture v2 final review
+
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths:
+      - experiments/quantum-narration-review-v2-20260915/**
+      - .github/workflows/quantum-narration-v2-review.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  patch:
+    name: apply final wording review
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HF_HOME: /tmp/huggingface
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TTS_DTYPE: float32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-prepared-inputs
+          run-id: 34977014409
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: experiments/quantum-narration-v2-20260915/inputs
+      - name: Prepare exact reviewed script
+        run: |
+          python -m py_compile experiments/quantum-narration-review-v2-20260915/review_patch.py
+          python experiments/quantum-narration-review-v2-20260915/review_patch.py prepare
+      - name: Publish reviewed script immediately
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-v2-reviewed-inputs
+          path: experiments/quantum-narration-v2-20260915/inputs
+          if-no-files-found: error
+          retention-days: 14
+      - name: Install proven CPU voice runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg sox
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+          python -m pip install --no-cache-dir numpy==1.26.4 scipy==1.11.4
+          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1
+          python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+      - name: Narrate only the corrected chunk 18
+        run: |
+          python -u experiments/lecture-tts-20260915/longform_shard.py \
+            --script experiments/quantum-narration-v2-20260915/inputs/narration.json \
+            --reference experiments/quantum-narration-v2-20260915/inputs/reference.ogg \
+            --output-dir experiments/quantum-narration-v2-20260915/reviewed-chunk \
+            --shard-index 17 --shard-count 87
+      - name: Preserve corrected audio and receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-v2-reviewed-chunk-18
+          path: experiments/quantum-narration-v2-20260915/reviewed-chunk
+          if-no-files-found: error
+          retention-days: 14
+
+  finalize:
+    name: verify and deliver reviewed MP3
+    needs: patch
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for the existing synthesis run without resubmitting it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          finished=0
+          for attempt in $(seq 1 120); do
+            state=$(gh api repos/onedayonemasterpiece/my-data-hub/actions/runs/34977014409 --jq .status)
+            echo "Original synthesis run: $state; check $attempt/120"
+            if [ "$state" = "completed" ]; then finished=1; break; fi
+            sleep 30
+          done
+          test "$finished" = "1" || { echo "Original synthesis did not complete within the bounded wait"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-v2-shard-*
+          run-id: 34977014409
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: experiments/quantum-narration-v2-20260915/base-shards
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-reviewed-inputs
+          path: experiments/quantum-narration-v2-20260915/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-reviewed-chunk-18
+          path: experiments/quantum-narration-v2-20260915/reviewed-chunk
+      - name: Install encoder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+      - name: Verify every retained chunk and produce final reviewed MP3
+        run: python experiments/quantum-narration-review-v2-20260915/review_patch.py finalize
+      - name: Publish the reviewed MP3 and matching script
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-lecture-expanded-v2-reviewed-final
+          path: experiments/quantum-narration-v2-20260915/final
+          if-no-files-found: error
+          retention-days: 14
