@@ -1,0 +1,120 @@
+name: Quantum lecture narration v2
+
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths:
+      - experiments/quantum-narration-v2-20260915/**
+      - .github/workflows/quantum-narration-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quantum-narration-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: validate 29-slide narration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate code and exact slide coverage
+        run: |
+          python -m py_compile experiments/quantum-narration-v2-20260915/prepare.py experiments/quantum-narration-v2-20260915/assemble.py experiments/lecture-tts-20260915/longform_shard.py
+          python experiments/quantum-narration-v2-20260915/prepare.py
+      - name: Publish prepared script
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-v2-prepared-inputs
+          path: experiments/quantum-narration-v2-20260915/inputs
+          if-no-files-found: error
+          retention-days: 7
+
+  synthesize:
+    name: narrate part ${{ matrix.shard }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      HF_HOME: /tmp/huggingface
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TTS_DTYPE: float32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-prepared-inputs
+          path: experiments/quantum-narration-v2-20260915/inputs
+      - name: Install proven CPU voice runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg sox
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+          python -m pip install --no-cache-dir numpy==1.26.4 scipy==1.11.4
+          python -m pip install --no-cache-dir qwen-tts==0.1.1 soundfile==0.13.1
+          python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 scipy==1.11.4
+      - name: Narrate only slide paragraphs
+        run: |
+          python -u experiments/lecture-tts-20260915/longform_shard.py \
+            --script experiments/quantum-narration-v2-20260915/inputs/narration.json \
+            --reference experiments/quantum-narration-v2-20260915/inputs/reference.ogg \
+            --output-dir experiments/quantum-narration-v2-20260915/shard-${{ matrix.shard }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 16
+      - name: Preserve completed audio and receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-v2-shard-${{ matrix.shard }}
+          path: experiments/quantum-narration-v2-20260915/shard-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: verify and deliver new MP3
+    needs: [prepare, synthesize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install encoder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-prepared-inputs
+          path: experiments/quantum-narration-v2-20260915/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-v2-shard-*
+          path: experiments/quantum-narration-v2-20260915/all-shards
+          merge-multiple: true
+      - name: Verify every chunk and encode new MP3
+        run: python experiments/quantum-narration-v2-20260915/assemble.py
+      - name: Publish final MP3 and exact new script
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-lecture-expanded-v2-final
+          path: experiments/quantum-narration-v2-20260915/final
+          if-no-files-found: error
+          retention-days: 14
