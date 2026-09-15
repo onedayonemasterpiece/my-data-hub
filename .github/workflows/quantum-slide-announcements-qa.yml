@@ -1,0 +1,88 @@
+name: Check audible slide numbers
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths: [.github/workflows/quantum-slide-announcements-qa.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare independent speech recognition
+        run: |
+          python -m pip install -q faster-whisper
+          python - <<'PY'
+          from faster_whisper import WhisperModel
+          WhisperModel('small', device='cpu', compute_type='int8', cpu_threads=4, download_root='/tmp/whisper-model')
+          PY
+      - name: Wait for header audio without restarting synthesis
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ready=0
+          for attempt in $(seq 1 90); do
+            count=$(gh api 'repos/onedayonemasterpiece/my-data-hub/actions/runs/34995370888/artifacts?per_page=100' --jq '[.artifacts[] | select(.name | startswith("quantum-slide-headers-"))] | length')
+            echo "Header artifacts: $count/8"
+            if [ "$count" = "8" ]; then ready=1; break; fi
+            sleep 20
+          done
+          test "$ready" = 1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-slide-headers-*
+          run-id: 34995370888
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: qa/headers
+          merge-multiple: true
+      - name: Independently transcribe and check all 29 spoken numbers
+        run: |
+          python -u - <<'PY'
+          import hashlib, json, re, runpy
+          from pathlib import Path
+          from faster_whisper import WhisperModel
+          root = Path('qa/headers')
+          records = {}
+          for path in sorted(root.glob('shard-*.json')):
+              for row in json.loads(path.read_text(encoding='utf-8'))['chunks']:
+                  if row['index'] in records:
+                      raise ValueError('Duplicate announcement')
+                  records[row['index']] = row
+          assert sorted(records) == list(range(1, 30))
+          ordinals = runpy.run_path('experiments/quantum-slide-cues-20260915/annotate.py')['ORDINALS']
+          model = WhisperModel('small', device='cpu', compute_type='int8', cpu_threads=4, download_root='/tmp/whisper-model')
+          report = []
+          for number in range(1, 30):
+              row = records[number]
+              path = root / 'chunks' / row['wav']
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == row['wav_sha256']
+              segments, info = model.transcribe(str(path), language='ru', beam_size=5, condition_on_previous_text=False, vad_filter=False)
+              text = ' '.join(s.text.strip() for s in segments)
+              normalized = re.sub(r'[^а-я0-9 ]+', ' ', text.lower().replace('ё', 'е'))
+              normalized = ' '.join(normalized.split())
+              digit = re.search(r'слайд\s+(\d+)(?:\s|$)', normalized)
+              expected = 'слайд ' + ordinals[number-1].replace('ё', 'е')
+              matched = expected in normalized or bool(digit and int(digit.group(1)) == number)
+              result = {'slide': number, 'expected_text': row['text'], 'recognized_text': text, 'number_verified_by_asr': matched, 'wav_sha256': row['wav_sha256']}
+              report.append(result)
+              print(json.dumps(result, ensure_ascii=False), flush=True)
+          output = Path('qa/report'); output.mkdir(parents=True, exist_ok=True)
+          payload = {'source_run_id': 34995370888, 'recognizer': 'faster-whisper small CPU int8', 'checked_announcements': len(report), 'verified_numbers': sum(r['number_verified_by_asr'] for r in report), 'items': report}
+          (output / 'spoken_slide_numbers_qa.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+          (output / 'spoken_slide_numbers_qa.txt').write_text('\n'.join(f"{r['slide']:02d}: {'OK' if r['number_verified_by_asr'] else 'REVIEW'} | {r['recognized_text']}" for r in report), encoding='utf-8')
+          print('Verified numbers:', payload['verified_numbers'], '/ 29', flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: quantum-spoken-slide-numbers-qa
+          path: qa/report
+          if-no-files-found: error
+          retention-days: 14
