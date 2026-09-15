@@ -66,6 +66,10 @@ jobs:
           (d / 'lecture_script.json').write_bytes(out)
           PY
 
+      - name: Validate generator syntax
+        run: |
+          python experiments/lecture-tts-20260915/fix_generator.py experiments/lecture-tts-20260915/run_longform.py
+
       - name: Synthesize lecture MP3
         run: |
           python experiments/lecture-tts-20260915/run_longform.py run \
