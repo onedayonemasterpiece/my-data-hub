@@ -35,7 +35,8 @@ def audit(shard: int):
     model=WhisperModel('medium',device='cpu',compute_type='int8',cpu_threads=4,download_root='/tmp/whisper-coverage')
     cursor=0;report=[]
     for n in range(1,54):
-        r=rows[n];p=ROOT/'raw/chunks'/r['wav'];assert sha(p)==r['wav_sha256']==metadata['chunk_sha256'][str(n)]]
+        r=rows[n];p=ROOT/'raw/chunks'/r['wav']
+        assert sha(p)==r['wav_sha256']==metadata['chunk_sha256'][str(n)]
         source=pcm(p);end=cursor+len(source)
         assert r['text']==expected[n-1]['text'] and r['slide']==expected[n-1]['slide']
         if (n-1)%6==shard:
