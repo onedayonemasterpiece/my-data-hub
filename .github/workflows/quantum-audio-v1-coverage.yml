@@ -1,0 +1,71 @@
+name: Quantum original narration speech audit
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths: [.github/workflows/quantum-audio-v1-coverage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    env:
+      OMP_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: lecture-tts-computer-in-cube-final
+          run-id: 34961112006
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage-v1/final
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lecture-tts-shard-*
+          run-id: 34961112006
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage-v1/raw
+          merge-multiple: true
+      - name: Install speech recognizer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install -q faster-whisper num2words numpy
+          python -m py_compile experiments/quantum-audio-coverage-20260917/legacy.py
+      - name: Check original speech against original script
+        run: python -u experiments/quantum-audio-coverage-20260917/legacy.py audit --shard ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: quantum-v1-speech-audit-${{ matrix.shard }}
+          path: coverage-v1/report
+          if-no-files-found: error
+          retention-days: 14
+  collect:
+    needs: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-v1-speech-audit-*
+          path: coverage-v1/reports
+          merge-multiple: true
+      - run: python experiments/quantum-audio-coverage-20260917/legacy.py collect
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quantum-v1-full-speech-audit
+          path: coverage-v1/report
+          if-no-files-found: error
+          retention-days: 14
