@@ -1,0 +1,85 @@
+name: Quantum lecture actual speech coverage
+on:
+  push:
+    branches: [work/quantum-narration-v2-20260915]
+    paths: [.github/workflows/quantum-audio-coverage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    name: actual speech and joins ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      OMP_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-lecture-expanded-v2-reviewed-final
+          run-id: 34979607472
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage/reviewed
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-lecture-with-audible-slide-numbers
+          run-id: 34995370888
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage/numbered
+      - uses: actions/download-artifact@v4
+        with:
+          name: quantum-v2-shard-${{ matrix.shard }}
+          run-id: 34977014409
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage/raw
+      - uses: actions/download-artifact@v4
+        if: ${{ matrix.shard == 1 }}
+        with:
+          name: quantum-v2-reviewed-chunk-18
+          run-id: 34979607472
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: coverage/replacement
+      - name: Install independent recognizer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install -q faster-whisper num2words numpy
+          python -m py_compile experiments/quantum-audio-coverage-20260917/audit.py
+      - name: Verify actual audio without providing the script to ASR
+        run: python -u experiments/quantum-audio-coverage-20260917/audit.py audit --shard ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: quantum-actual-speech-audit-${{ matrix.shard }}
+          path: coverage/report
+          if-no-files-found: error
+          retention-days: 14
+  collect:
+    needs: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: quantum-actual-speech-audit-*
+          path: coverage/reports
+          merge-multiple: true
+      - run: python experiments/quantum-audio-coverage-20260917/audit.py collect
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quantum-full-speech-coverage-report
+          path: coverage/report
+          if-no-files-found: error
+          retention-days: 14
