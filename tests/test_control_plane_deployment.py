@@ -51,6 +51,17 @@ def test_voice_v2_media_tools_and_private_spool_are_bounded_to_control_plane() -
     assert "MY_DATA_HUB_VOICE_V2_SPOOL_DIR=$voice_v2_spool_dir" in installer
 
 
+def test_provider_only_override_preserves_voice_v2_spool_mount() -> None:
+    source = installer_source()
+    provider_start = source.index('if [[ "$provider_only" == true ]]; then')
+    provider_end = source.index('if [[ "$unified_bootstrap" == true ]]; then', provider_start)
+    provider_override = source[provider_start:provider_end]
+    assert (
+        '"${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:?voice intake v2 spool directory is required}'
+        ':/voice-intake-v2"'
+    ) in provider_override
+
+
 def provider_oauth_client_probe_source() -> str:
     source = installer_source()
     marker = 'provider_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'

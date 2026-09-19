@@ -604,6 +604,7 @@ services:
     volumes: !override
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"
       - "${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads"
+      - "${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:?voice intake v2 spool directory is required}:/voice-intake-v2"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   remote-mcp:
     environment:
