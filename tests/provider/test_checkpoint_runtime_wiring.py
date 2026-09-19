@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -695,6 +696,11 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
             exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
     else:
         monkeypatch.delenv("MY_DATA_HUB_CHECKPOINT_DIRECTORY", raising=False)
+        # This generated program runs in the pinned Kaggle provider image.  The
+        # unit test may itself run on a newer supported host Python, so model
+        # the provider runtime explicitly instead of coupling the test runner
+        # to the provider ABI.
+        monkeypatch.setattr(platform, "python_version", lambda: "3.12.99")
         installs: list[tuple[str, ...]] = []
         monkeypatch.setattr(
             subprocess,

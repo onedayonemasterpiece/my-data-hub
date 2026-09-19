@@ -213,7 +213,7 @@ def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(
     pins = {
         "schema": "my-data-hub-notebook-execution-pins/v1",
         "notebook": spec.directory,
-        "python_series": ".".join(platform.python_version().split(".")[:2]),
+        "python_series": create_notebooks.SUPPORTED_PYTHON_SERIES,
         "image_source_commit": "f" * 40,
         "kaggle_runtime_image_identity": image_identity,
         "input_dataset_versions": dataset_versions,
@@ -252,6 +252,9 @@ def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
+    # Execute the generated cell as though it were inside the pinned Kaggle
+    # image even when this repository test runs on a newer host Python.
+    monkeypatch.setattr(platform, "python_version", lambda: "3.12.99")
     exec(compile(notebook.cells[1].source, "<generated-install-cell>", "exec"), {})
     assert calls and calls[0][-1] == str(wheel)
 
