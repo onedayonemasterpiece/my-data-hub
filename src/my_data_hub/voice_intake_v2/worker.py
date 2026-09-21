@@ -117,13 +117,17 @@ class VoiceIntakeV2Worker:
         try:
             await self._process(session)
         except StageFailure as exc:
+            stage, attempt = self.store.active_inference_attempt(
+                session.session_id, self.owner
+            )
             if exc.diagnostics:
                 diagnostic = exc.diagnostics
                 LOGGER.warning(
                     "voice_v2_stage_failure session_id=%s code=%s schema=%s "
                     "schema_version=%s json_path=%s expected=%s actual=%s "
                     "missing_fields=%s extra_fields=%s finish_reason=%s token_counts=%s "
-                    "configured_max_output_tokens=%s truncated=%s",
+                    "configured_max_output_tokens=%s truncated=%s stage=%s attempt=%s "
+                    "max_attempts=%s",
                     session.session_id,
                     exc.code,
                     diagnostic.get("schema"),
@@ -137,13 +141,22 @@ class VoiceIntakeV2Worker:
                     json.dumps(diagnostic.get("token_counts"), sort_keys=True),
                     diagnostic.get("configured_max_output_tokens"),
                     diagnostic.get("truncated"),
+                    stage,
+                    attempt,
+                    self.settings.schema_failure_max_attempts,
                 )
             ambiguous = exc.ambiguous
             # A received/finalized 429 is a known quota rejection, not an
             # unknown generation outcome. Keep it recoverable through the
             # shared limiter; no immediate retry occurs inside the adapter.
-            safe_retry = exc.retryable and not ambiguous and (
-                not exc.sent or exc.code == "provider_429"
+            bounded_schema_retry = (
+                exc.code == "response_schema_invalid"
+                and exc.sent
+                and exc.retryable
+                and attempt < self.settings.schema_failure_max_attempts
+            )
+            safe_retry = not ambiguous and exc.retryable and (
+                not exc.sent or exc.code == "provider_429" or bounded_schema_retry
             )
             retry_at = (
                 self._clock() + (exc.retry_after_seconds or (60 if exc.sent else 30))
@@ -214,9 +227,11 @@ class VoiceIntakeV2Worker:
         return StageCheckpoint(
             self.store.session_directory(session.session_id), session.session_id,
             stage, fingerprint(session.complete),
-            lambda: self.store.set_state(session.session_id, self.owner,
-                                        "transcribing" if stage == "transcript" else "summarizing"),
+            lambda: self._begin_inference_attempt(session.session_id, stage),
         )
+
+    def _begin_inference_attempt(self, session_id: str, stage: str) -> None:
+        self.store.begin_inference_attempt(session_id, self.owner, stage)
 
     async def _restore(self, checkpoint: StageCheckpoint) -> InferenceReceipt | None:
         saved = checkpoint.load()

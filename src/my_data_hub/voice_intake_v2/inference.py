@@ -211,7 +211,9 @@ class AggregateGeminiInference:
                 raise StageFailure(
                     "response_schema_invalid",
                     sent=True,
-                    retryable=finish_reason == "MAX_TOKENS",
+                    retryable=finish_reason not in {
+                        "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"
+                    },
                     diagnostics=self._validation_diagnostics(
                         schema=schema,
                         schema_name=schema_name,
@@ -240,7 +242,7 @@ class AggregateGeminiInference:
             raise StageFailure(
                 "response_schema_invalid",
                 sent=True,
-                retryable=False,
+                retryable=True,
                 diagnostics=self._validation_diagnostics(
                     schema=schema,
                     schema_name=schema_name,

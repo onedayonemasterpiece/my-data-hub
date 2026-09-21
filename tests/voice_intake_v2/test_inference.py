@@ -161,6 +161,41 @@ async def test_provider_timeout_makes_one_physical_post_and_fences_ambiguity(
 
 
 @pytest.mark.asyncio
+async def test_recitation_is_a_definite_retryable_response(
+    tmp_path, auth_settings, terminology
+):
+    class RecitationRequester(Requester):
+        async def request_json(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return BoundedHTTPResponse(
+                200,
+                {
+                    "candidates": [{"finishReason": "RECITATION"}],
+                    "usageMetadata": {"promptTokenCount": 100, "totalTokenCount": 100},
+                },
+                None,
+                "application/json",
+            )
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"mp3")
+    limiter, requester = Limiter(), RecitationRequester()
+    service = AggregateGeminiInference(auth_settings, limiter=limiter, requester=requester)
+
+    with pytest.raises(StageFailure) as raised:
+        await service.transcribe(
+            audio_path=audio, recorded_audio_ms=20_000, terminology=terminology
+        )
+
+    failure = raised.value
+    assert failure.code == "response_schema_invalid"
+    assert failure.sent and failure.retryable and not failure.ambiguous
+    assert failure.diagnostics["finish_reason"] == "RECITATION"
+    assert len(requester.calls) == 1
+    assert len(limiter.finalized) == 1
+
+
+@pytest.mark.asyncio
 async def test_twenty_minute_aggregate_transcription_has_bounded_headroom_and_one_post(
     tmp_path, auth_settings, terminology
 ):
@@ -291,7 +326,7 @@ async def test_malformed_stop_response_fails_closed_with_sanitized_shape(
 
     failure = raised.value
     assert failure.code == "response_schema_invalid"
-    assert failure.sent and not failure.retryable and not failure.ambiguous
+    assert failure.sent and failure.retryable and not failure.ambiguous
     assert failure.diagnostics["schema"] == "voice_intake_transcript"
     assert failure.diagnostics["schema_version"] == "1.0.0"
     assert failure.diagnostics["json_path"] == "$.transcript"

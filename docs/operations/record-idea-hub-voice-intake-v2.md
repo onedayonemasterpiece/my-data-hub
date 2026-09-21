@@ -162,10 +162,14 @@ preflight
 
 Transcription reserve is `recorded_audio_seconds * 32`, not wall duration and
 not full model TPM. Pre-send quota denial makes zero provider POSTs. After
-`mark_sent`, there is no hidden retry: timeout or other ambiguous outcome
-enters `reconciliation_required`. Provider 429 consumes exactly the one sent
-attempt and is reported through the limiter. Summary retry repeats only the
-summary; GitHub retry repeats neither inference stage.
+`mark_sent`, there is no hidden retry inside the provider adapter: timeout or
+another ambiguous outcome enters `reconciliation_required`. A definitively
+received but malformed, truncated, or `RECITATION` response is not ambiguous;
+the worker durably counts the physical POST and may schedule another attempt,
+up to three attempts per stage. Safety and policy blocks are not retried.
+Provider 429 consumes exactly the one sent attempt and is reported through the
+limiter. Summary retry repeats only the summary; GitHub retry repeats neither
+inference stage.
 
 ## Completion, publication and purge
 

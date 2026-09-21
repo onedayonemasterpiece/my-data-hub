@@ -30,6 +30,7 @@ class VoiceIntakeV2Settings:
     ffmpeg_timeout_seconds: int
     duration_tolerance_ms: int
     max_session_bytes: int = 64 * 1024 * 1024
+    schema_failure_max_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> VoiceIntakeV2Settings:
@@ -50,6 +51,9 @@ class VoiceIntakeV2Settings:
             duration_tolerance_ms=_integer("MY_DATA_HUB_VOICE_V2_DURATION_TOLERANCE_MS", 2000),
             max_session_bytes=_integer(
                 "MY_DATA_HUB_VOICE_V2_MAX_SESSION_BYTES", 64 * 1024 * 1024
+            ),
+            schema_failure_max_attempts=_integer(
+                "MY_DATA_HUB_VOICE_V2_SCHEMA_FAILURE_MAX_ATTEMPTS", 3
             ),
         )
         result.validate()
@@ -76,3 +80,7 @@ class VoiceIntakeV2Settings:
             raise VoiceIntakeV2ConfigurationError("ffprobe timeout must be 1..60 seconds")
         if not 10 <= self.ffmpeg_timeout_seconds <= 1800:
             raise VoiceIntakeV2ConfigurationError("ffmpeg timeout must be 10..1800 seconds")
+        if not 2 <= self.schema_failure_max_attempts <= 5:
+            raise VoiceIntakeV2ConfigurationError(
+                "schema failure max attempts must be 2..5"
+            )

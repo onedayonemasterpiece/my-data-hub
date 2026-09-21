@@ -134,6 +134,8 @@ class VoiceIntakeV2Store:
                     summary_json TEXT,
                     summary_request_uid TEXT,
                     summary_limiter_json TEXT,
+                    transcript_attempts INTEGER NOT NULL DEFAULT 0,
+                    summary_attempts INTEGER NOT NULL DEFAULT 0,
                     github_url TEXT,
                     github_commit_sha TEXT,
                     github_verified INTEGER NOT NULL DEFAULT 0,
@@ -165,6 +167,17 @@ class VoiceIntakeV2Store:
                   ON sessions(state, lease_until, retry_at, updated_at);
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "transcript_attempts" not in columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN transcript_attempts INTEGER NOT NULL DEFAULT 0"
+                )
+            if "summary_attempts" not in columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0"
+                )
         self._secure_database_files()
 
     @staticmethod
@@ -485,6 +498,40 @@ class VoiceIntakeV2Store:
 
     def set_state(self, session_id: str, owner: str, state: str) -> None:
         self._owned_update(session_id, owner, "state=?", (state,))
+
+    def begin_inference_attempt(self, session_id: str, owner: str, stage: str) -> int:
+        """Durably count a physical provider POST immediately before dispatch."""
+        if stage not in {"transcript", "summary"}:
+            raise ValueError("invalid inference stage")
+        column = "transcript_attempts" if stage == "transcript" else "summary_attempts"
+        state = "transcribing" if stage == "transcript" else "summarizing"
+        now = self._clock()
+        with self._transaction() as connection:
+            changed = connection.execute(
+                f"""UPDATE sessions SET state=?,{column}={column}+1,updated_at=?
+                    WHERE session_id=? AND lease_owner=? AND lease_until>?""",
+                (state, now, session_id, owner, now),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("worker_lease_lost")
+            row = connection.execute(
+                f"SELECT {column} FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return int(row[column])
+
+    def active_inference_attempt(self, session_id: str, owner: str) -> tuple[str, int]:
+        """Return the incomplete stage and its durable physical POST count."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT transcript_json,transcript_attempts,summary_attempts
+                   FROM sessions WHERE session_id=? AND lease_owner=?""",
+                (session_id, owner),
+            ).fetchone()
+        if row is None:
+            raise StoreError("worker_lease_lost")
+        if row["transcript_json"] is None:
+            return "transcript", int(row["transcript_attempts"])
+        return "summary", int(row["summary_attempts"])
 
     def persist_transcript(
         self, session_id: str, owner: str, value: dict[str, Any], request_uid: str,

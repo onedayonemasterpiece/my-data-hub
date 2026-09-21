@@ -110,13 +110,14 @@ def matching_complete(store, complete_request) -> SessionCompleteRequest:
 
 
 @pytest.mark.asyncio
-async def test_sent_truncation_does_not_treat_duplicate_complete_as_consent_and_logs_safely(
+async def test_sent_truncation_schedules_server_retry_and_duplicate_complete_is_only_idempotent(
     tmp_path, create_request, complete_request, terminology, caplog
 ):
     class RetryTruncatedInference(Inference):
         async def transcribe(self, **kwargs):
             self.calls.append(("transcribe", kwargs["recorded_audio_ms"], kwargs["terminology"]))
             if len([call for call in self.calls if call[0] == "transcribe"]) == 1:
+                kwargs["checkpoint"].dispatch()
                 raise StageFailure(
                     "response_schema_invalid",
                     sent=True,
@@ -164,15 +165,55 @@ async def test_sent_truncation_does_not_treat_duplicate_complete_as_consent_and_
     assert await worker.process_once()
     failed = store.status(SESSION_ID)
     assert failed.state == "retryable_error"
-    assert not failed.retryable and failed.retry_at is None
+    assert failed.retryable and failed.retry_at is not None
     assert [call[0] for call in inference.calls] == ["transcribe"]
     assert "finish_reason=MAX_TOKENS" in caplog.text
     assert "configured_max_output_tokens=65536" in caplog.text
+    assert "stage=transcript attempt=1 max_attempts=3" in caplog.text
     assert "PRIVATE" not in caplog.text
 
     store.complete(SESSION_ID, matching_complete(store, complete_request))
     assert not await worker.process_once()
     assert [call[0] for call in inference.calls] == ["transcribe"]
+
+
+@pytest.mark.asyncio
+async def test_schema_failure_retries_are_durable_and_bounded(
+    tmp_path, create_request, complete_request, terminology
+):
+    class AlwaysInvalid(Inference):
+        async def transcribe(self, **kwargs):
+            self.calls.append("transcribe")
+            kwargs["checkpoint"].dispatch()
+            raise StageFailure(
+                "response_schema_invalid", sent=True, retryable=True,
+                diagnostics={"finish_reason": "RECITATION"},
+            )
+
+    store = queued(tmp_path, create_request, complete_request, terminology)
+    now = [store._clock()]
+    store._clock = lambda: now[0]
+    inference = AlwaysInvalid()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media(), inference=inference,
+        publisher=Publisher(), owner="worker", clock=lambda: now[0],
+    )
+
+    for expected_attempt in (1, 2, 3):
+        assert await worker.process_once()
+        status = store.status(SESSION_ID)
+        assert status.retryable is (expected_attempt < 3)
+        if expected_attempt < 3:
+            now[0] += 61
+
+    assert not await worker.process_once()
+    assert inference.calls == ["transcribe"] * 3
+    with store._connect() as connection:
+        attempts = connection.execute(
+            "SELECT transcript_attempts,summary_attempts FROM sessions WHERE session_id=?",
+            (SESSION_ID,),
+        ).fetchone()
+    assert tuple(attempts) == (3, 0)
 
 
 @pytest.mark.asyncio
