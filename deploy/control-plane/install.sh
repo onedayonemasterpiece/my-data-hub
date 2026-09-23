@@ -697,7 +697,7 @@ PY
     -v "$showcase_edge_token:/edge-token:ro" \
     -v "$showcase_runtime_token:/runtime-token:ro" \
     -v "$showcase_runtime_env:/runtime.env:ro" \
-    "$image" python -c '
+    "$image" -c '
 from pathlib import Path
 edge = Path("/edge-token").read_bytes().strip()
 runtime = Path("/runtime-token").read_bytes().strip()
