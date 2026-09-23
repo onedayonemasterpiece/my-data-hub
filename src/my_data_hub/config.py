@@ -93,6 +93,7 @@ class Settings:
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
     mcp_provider_profile_enabled: bool = False
+    mcp_bounded_full_profile_enabled: bool = False
     mcp_unified_bootstrap_profile_enabled: bool = False
     mcp_acceptance_scenarios_enabled: bool = False
     mcp_control_gateway_url: str = ""
@@ -201,6 +202,9 @@ class Settings:
             ),
             mcp_provider_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False
+            ),
+            mcp_bounded_full_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_BOUNDED_FULL_PROFILE_ENABLED", False
             ),
             mcp_unified_bootstrap_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False
@@ -331,6 +335,7 @@ class Settings:
         )
         if self.mcp_provider_profile_enabled and (
             self.mcp_operator_profile_enabled
+            or self.mcp_bounded_full_profile_enabled
             or not self.mcp_write_enabled
             or self.mcp_scopes != provider_only_scopes
             or self.mcp_acceptance_scenarios_enabled
@@ -340,6 +345,32 @@ class Settings:
             raise ConfigurationError(
                 "provider-only MCP requires its exclusive profile and exactly "
                 "platform:read, provider:read and provider:write through the single control gateway"
+            )
+        bounded_full_scopes = frozenset(
+            {
+                "platform:read",
+                "provider:read",
+                "provider:write",
+                "youtube:analyze",
+                "showcase:read",
+                "showcase:write",
+            }
+        )
+        if self.mcp_bounded_full_profile_enabled and (
+            self.mcp_operator_profile_enabled
+            or self.mcp_provider_profile_enabled
+            or self.mcp_unified_bootstrap_profile_enabled
+            or not self.mcp_write_enabled
+            or self.mcp_scopes != bounded_full_scopes
+            or not self.google_youtube_enabled
+            or not self.showcase_enabled
+            or self.mcp_acceptance_scenarios_enabled
+            or not self.mcp_control_gateway_url
+            or self.mcp_control_gateway_token_file is None
+        ):
+            raise ConfigurationError(
+                "bounded full MCP requires its exclusive profile and exactly the provider, "
+                "YouTube and Showcase scopes through isolated gateways"
             )
         unified_bootstrap_scopes = frozenset(
             {
@@ -361,6 +392,7 @@ class Settings:
         if self.mcp_unified_bootstrap_profile_enabled and (
             self.mcp_operator_profile_enabled
             or self.mcp_provider_profile_enabled
+            or self.mcp_bounded_full_profile_enabled
             or not self.mcp_write_enabled
             or self.mcp_scopes != unified_bootstrap_scopes
             or self.mcp_acceptance_scenarios_enabled
@@ -570,6 +602,7 @@ class Settings:
             or not (
                 self.mcp_operator_profile_enabled
                 or self.mcp_unified_bootstrap_profile_enabled
+                or self.mcp_bounded_full_profile_enabled
             )
             or self.mcp_provider_profile_enabled
             or "youtube:analyze" not in self.mcp_scopes

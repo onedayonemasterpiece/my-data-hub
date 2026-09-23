@@ -79,6 +79,23 @@ async def test_unified_profile_lists_all_showcase_tools_when_manager_is_enabled(
 
 
 @pytest.mark.asyncio
+async def test_bounded_full_profile_lists_only_provider_and_showcase_tools(monkeypatch) -> None:
+    monkeypatch.delenv("MY_DATA_HUB_SHOWCASE_ENABLED", raising=False)
+    server = create_server(
+        settings(),  # type: ignore[arg-type]
+        dependencies=MCPDependencies(
+            showcase_manager=FakeShowcaseManager(),  # type: ignore[arg-type]
+            bounded_full_profile_enabled=True,
+        ),
+        default_identity=identity(),
+    )
+    names = {tool.name for tool in await server.list_tools()}
+    assert names >= SHOWCASE_TOOLS
+    assert "data.change.apply" not in names
+    assert "master.ensure" not in names
+
+
+@pytest.mark.asyncio
 async def test_standard_mcp_hides_showcase_tools_when_not_configured(monkeypatch) -> None:
     monkeypatch.delenv("MY_DATA_HUB_SHOWCASE_ENABLED", raising=False)
     server = create_server(

@@ -116,6 +116,7 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.acceptance.claim.cleanup",
     }
 )
+BOUNDED_FULL_TOOLS = PROVIDER_ONLY_TOOLS | _SHOWCASE_TOOL_NAMES
 UNIFIED_BOOTSTRAP_TOOLS = PROVIDER_ONLY_TOOLS | READER_PROFILE_TOOLS
 
 
@@ -138,6 +139,7 @@ class MCPDependencies:
     sql_policy: BoundedSQLPolicy | None = None
     acceptance_scenarios_enabled: bool = False
     provider_only_profile_enabled: bool = False
+    bounded_full_profile_enabled: bool = False
     unified_bootstrap_profile_enabled: bool = False
     reader_profile_enabled: bool = False
     region_talk_controller: RegionTalkPipelineController | None = None
@@ -216,6 +218,8 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
         names.discard("region_talk.pipeline.run")
     if dependencies.provider_only_profile_enabled:
         names &= PROVIDER_ONLY_TOOLS
+    if dependencies.bounded_full_profile_enabled:
+        names &= BOUNDED_FULL_TOOLS
     if dependencies.unified_bootstrap_profile_enabled:
         unified_tools = UNIFIED_BOOTSTRAP_TOOLS
         if dependencies.showcase_manager is not None:

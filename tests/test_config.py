@@ -106,6 +106,38 @@ def test_development_token_http_can_bind_loopback(monkeypatch: pytest.MonkeyPatc
     assert settings.mcp_remote_enabled is True
 
 
+def test_bounded_full_profile_accepts_exact_provider_youtube_showcase_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_hub_environment(monkeypatch)
+    values = {
+        "MY_DATA_HUB_MCP_REMOTE_ENABLED": "true",
+        "MY_DATA_HUB_MCP_WRITE_ENABLED": "true",
+        "MY_DATA_HUB_MCP_AUTH_MODE": "development-token",
+        "MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN": "test-only",
+        "MY_DATA_HUB_MCP_BOUNDED_FULL_PROFILE_ENABLED": "true",
+        "MY_DATA_HUB_MCP_SCOPES": (
+            "platform:read,provider:read,provider:write,youtube:analyze,"
+            "showcase:read,showcase:write"
+        ),
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL": (
+            "http://127.0.0.1:8080/internal/mcp-provider/invoke"
+        ),
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE": "/run/secrets/control.token",
+        "MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED": "true",
+        "MY_DATA_HUB_SHOWCASE_ENABLED": "true",
+        "GOOGLE_AI_LIMITER_SUPABASE_URL": "https://limiter.example.test",
+        "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY": "test-service-key",
+        "GOOGLE_AI_NORMAL_KEY_ENVS": "GOOGLE_API_KEY",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    settings = Settings.from_env(require_database=False)
+    assert settings.mcp_bounded_full_profile_enabled is True
+    assert settings.mcp_operator_profile_enabled is False
+    assert settings.mcp_provider_profile_enabled is False
+
+
 def test_production_oauth_requires_separate_revocation_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -264,6 +264,7 @@ def build_remote_runtime(
     if runtime_settings.mcp_write_enabled and not (
         runtime_settings.mcp_operator_profile_enabled
         or runtime_settings.mcp_provider_profile_enabled
+        or runtime_settings.mcp_bounded_full_profile_enabled
         or runtime_settings.mcp_unified_bootstrap_profile_enabled
     ):
         raise ConfigurationError(
@@ -284,7 +285,10 @@ def build_remote_runtime(
             secret = secret_path.read_bytes().strip()
             if mode & 0o077 or not 32 <= len(secret) <= 256:
                 raise ConfigurationError("operator write-gate secret violates the bounded private-file contract")
-            if runtime_settings.mcp_provider_profile_enabled:
+            if (
+                runtime_settings.mcp_provider_profile_enabled
+                or runtime_settings.mcp_bounded_full_profile_enabled
+            ):
                 write_gate = ProviderOnlyWriteGate(secret)
             elif runtime_settings.mcp_unified_bootstrap_profile_enabled:
                 write_gate = UnifiedBootstrapWriteGate(secret)
@@ -343,10 +347,12 @@ def build_remote_runtime(
         sql_policy=exact_sql_policy,
         acceptance_scenarios_enabled=runtime_settings.mcp_acceptance_scenarios_enabled,
         provider_only_profile_enabled=runtime_settings.mcp_provider_profile_enabled,
+        bounded_full_profile_enabled=runtime_settings.mcp_bounded_full_profile_enabled,
         unified_bootstrap_profile_enabled=runtime_settings.mcp_unified_bootstrap_profile_enabled,
         reader_profile_enabled=not (
             runtime_settings.mcp_operator_profile_enabled
             or runtime_settings.mcp_provider_profile_enabled
+            or runtime_settings.mcp_bounded_full_profile_enabled
             or runtime_settings.mcp_unified_bootstrap_profile_enabled
         ),
     )

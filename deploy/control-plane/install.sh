@@ -5,6 +5,7 @@ umask 077
 action="${1:-}"
 operator_profile=false
 provider_only=false
+bounded_full=false
 unified_bootstrap=false
 acceptance_supervisor=false
 acceptance_scenarios=false
@@ -20,12 +21,18 @@ fi
 if [[ "$action" == "INSTALL_MY_DATA_HUB_PROVIDER_MCP" ]]; then
   provider_only=true
 fi
+if [[ "$action" == "INSTALL_MY_DATA_HUB_BOUNDED_FULL" ]]; then
+  # Reuse the lightweight provider control plane while the remote surface is
+  # replaced by the exact Provider + YouTube + Showcase capability profile.
+  provider_only=true
+  bounded_full=true
+fi
 if [[ "$action" == "INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP" ]]; then
   unified_bootstrap=true
 fi
 if [[ "$action" != "PREPARE_CONTROL_PLANE" && "$action" != "INSTALL_MY_DATA_HUB_CONTROL_PLANE" \
   && "$operator_profile" != true && "$provider_only" != true && "$unified_bootstrap" != true ]]; then
-  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR|INSTALL_MY_DATA_HUB_PROVIDER_MCP|INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP" >&2
+  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR|INSTALL_MY_DATA_HUB_PROVIDER_MCP|INSTALL_MY_DATA_HUB_BOUNDED_FULL|INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP" >&2
   exit 2
 fi
 
@@ -139,6 +146,16 @@ tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-h
 acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_root/acceptance-supervisor}"
 acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
 checkpoint_acceptance_deployment="${MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE:-$runtime_root/checkpoint-acceptance-deployment.json}"
+google_ai_env="${MY_DATA_HUB_GOOGLE_AI_ENV_FILE:-$env_root/google-ai.env}"
+showcase_root="${MY_DATA_HUB_SHOWCASE_ROOT:-$runtime_root/showcase}"
+showcase_edge_token="${MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE:-$showcase_root/edge-secrets/gateway.key}"
+showcase_runtime_token="${MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE:-$showcase_root/runtime-secrets/gateway.key}"
+showcase_read_key="${MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE:-$showcase_root/runtime-secrets/idea-hub-read-key}"
+showcase_write_key="${MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE:-$showcase_root/runtime-secrets/idea-hub-write-key}"
+showcase_known_hosts="${MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE:-$showcase_root/config/github-known-hosts}"
+showcase_public_dir="${MY_DATA_HUB_SHOWCASE_PUBLIC_DIR:-$showcase_root/public}"
+showcase_state_dir="${MY_DATA_HUB_SHOWCASE_STATE_DIR:-$showcase_root/state}"
+showcase_runtime_env="${MY_DATA_HUB_SHOWCASE_RUNTIME_ENV_FILE:-$showcase_root/runtime-secrets/runtime.env}"
 if [[ -n "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME:-}" ]]; then
   [[ "$provider_only" != true && "$unified_bootstrap" != true ]] || { echo "bounded MCP profiles forbid connector runtime" >&2; exit 2; }
   if [[ "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME}" != "I_ACKNOWLEDGE_CONNECTOR_CANONICAL_WRITES" ]]; then
@@ -186,7 +203,10 @@ for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir
   "$owner_operator_token" "$owner_portal_state_key" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
   "$checkpoint_upload_broker_key" \
-  "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
+  "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment" \
+  "$google_ai_env" "$showcase_root" "$showcase_edge_token" "$showcase_runtime_token" \
+  "$showcase_read_key" "$showcase_write_key" "$showcase_known_hosts" "$showcase_public_dir" \
+  "$showcase_state_dir" "$showcase_runtime_env"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -471,6 +491,10 @@ provider_only_override=""
 provider_only_compose_arg=""
 unified_bootstrap_override=""
 unified_bootstrap_compose_arg=""
+bounded_full_override=""
+bounded_full_compose_arg=""
+showcase_compose_arg=""
+showcase_services=""
 acceptance_override=""
 acceptance_compose_arg=""
 connector_override=""
@@ -627,6 +651,86 @@ services:
 YAML
   chmod 600 "$provider_only_override"
   provider_only_compose_arg=" -f $provider_only_override"
+fi
+if [[ "$bounded_full" == true ]]; then
+  require_private_file "$google_ai_env" "bounded Google AI environment"
+  require_private_file "$showcase_edge_token" "Showcase edge gateway token"
+  require_regular_file "$showcase_runtime_token" "Showcase runtime gateway token"
+  require_regular_file "$showcase_read_key" "Showcase read deploy key"
+  require_regular_file "$showcase_write_key" "Showcase write deploy key"
+  require_regular_file "$showcase_runtime_env" "Showcase runtime environment"
+  require_regular_file "$showcase_known_hosts" "Showcase GitHub known-hosts"
+  for runtime_secret in "$showcase_runtime_token" "$showcase_read_key" "$showcase_write_key" "$showcase_runtime_env"; do
+    [[ "$(stat -c '%u:%g:%a' "$runtime_secret")" == "65532:65532:400" ]] || {
+      echo "Showcase runtime secret must be owned by 65532:65532 with mode 0400: $runtime_secret" >&2
+      exit 2
+    }
+  done
+  for directory in "$showcase_public_dir" "$showcase_state_dir"; do
+    [[ -d "$directory" && ! -L "$directory" ]] || {
+      echo "Showcase runtime directory must be a real directory: $directory" >&2
+      exit 2
+    }
+  done
+  python3 - "$google_ai_env" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+google_env = Path(sys.argv[1])
+keys = set()
+for line in google_env.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if "=" not in stripped:
+        raise SystemExit("bounded Google AI environment contains an invalid line")
+    key = stripped.split("=", 1)[0].strip()
+    if key in keys or not re.fullmatch(r"(?:GOOGLE_API_KEY[0-9]*|GOOGLE_AI_[A-Z0-9_]+)", key):
+        raise SystemExit("bounded Google AI environment contains a duplicate or forbidden key")
+    keys.add(key)
+required = {"GOOGLE_AI_LIMITER_SUPABASE_URL", "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY", "GOOGLE_AI_NORMAL_KEY_ENVS"}
+if not required <= keys or not any(re.fullmatch(r"GOOGLE_API_KEY[0-9]*", key) for key in keys):
+    raise SystemExit("bounded Google AI environment is incomplete")
+PY
+  "$docker_path" run --rm --user 0:0 \
+    -v "$showcase_edge_token:/edge-token:ro" \
+    -v "$showcase_runtime_token:/runtime-token:ro" \
+    -v "$showcase_runtime_env:/runtime.env:ro" \
+    "$image" python -c '
+from pathlib import Path
+edge = Path("/edge-token").read_bytes().strip()
+runtime = Path("/runtime-token").read_bytes().strip()
+if edge != runtime or not 32 <= len(edge) <= 256:
+    raise SystemExit("Showcase gateway token pair is invalid")
+text = Path("/runtime.env").read_text(encoding="utf-8")
+for forbidden in ("GITHUB_TOKEN", "GITHUB_WRITE_TOKEN", "SHOWCASE_SOURCE_ROOT"):
+    if forbidden in text:
+        raise SystemExit(f"Showcase runtime environment contains forbidden {forbidden}")
+'
+  bounded_full_override="$runtime_root/bounded-full.$commit.yaml"
+  cat > "$bounded_full_override" <<'YAML'
+services:
+  remote-mcp:
+    env_file: !override
+      - path: "${MY_DATA_HUB_MCP_ENV_FILE:?remote MCP environment is required}"
+        required: true
+      - path: "${MY_DATA_HUB_GOOGLE_AI_ENV_FILE:?bounded Google AI environment is required}"
+        required: true
+    environment:
+      MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "false"
+      MY_DATA_HUB_MCP_BOUNDED_FULL_PROFILE_ENABLED: "true"
+      MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"
+      MY_DATA_HUB_SHOWCASE_ENABLED: "true"
+      MY_DATA_HUB_MCP_SCOPES: platform:read,provider:read,provider:write,youtube:analyze,showcase:read,showcase:write
+  oauth-server:
+    environment:
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,provider:read,provider:write,youtube:analyze,showcase:read,showcase:write
+YAML
+  chmod 600 "$bounded_full_override"
+  bounded_full_compose_arg=" -f $bounded_full_override"
+  showcase_compose_arg=" -f $release/compose.showcase.yaml"
+  showcase_services=" showcase-runtime showcase-static"
 fi
 if [[ "$unified_bootstrap" == true ]]; then
   require_private_file "$operator_gate_key" "unified provider write-gate signing key"
@@ -935,6 +1039,21 @@ MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE=$checkpoint_upload_broker_key
 MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR=$embedding_credential_dir
 MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED=${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}
 MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED=${MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED:-true}
+MY_DATA_HUB_GOOGLE_AI_ENV_FILE=$google_ai_env
+MY_DATA_HUB_SHOWCASE_EDGE_GATEWAY_TOKEN_FILE=$showcase_edge_token
+MY_DATA_HUB_SHOWCASE_RUNTIME_GATEWAY_TOKEN_FILE=$showcase_runtime_token
+MY_DATA_HUB_SHOWCASE_GITHUB_SSH_KEY_FILE=$showcase_read_key
+MY_DATA_HUB_SHOWCASE_GITHUB_WRITE_SSH_KEY_FILE=$showcase_write_key
+MY_DATA_HUB_SHOWCASE_GITHUB_KNOWN_HOSTS_FILE=$showcase_known_hosts
+MY_DATA_HUB_SHOWCASE_PUBLIC_DIR=$showcase_public_dir
+MY_DATA_HUB_SHOWCASE_STATE_DIR=$showcase_state_dir
+MY_DATA_HUB_SHOWCASE_RUNTIME_ENV_FILE=$showcase_runtime_env
+MY_DATA_HUB_SHOWCASE_RUNTIME_PORT=8790
+MY_DATA_HUB_SHOWCASE_GATEWAY_TIMEOUT_SECONDS=240
+MY_DATA_HUB_SHOWCASE_IMAGE=my-data-hub-showcase:$commit
+MY_DATA_HUB_SHOWCASE_MEMORY_LIMIT=512m
+MY_DATA_HUB_SHOWCASE_CPU_LIMIT=1.00
+MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE=platform:read,provider:read,provider:write,youtube:analyze,showcase:read,showcase:write
 ENV
 chmod 600 "$compose_env"
 
@@ -944,6 +1063,10 @@ if [[ -n "$operator_override" ]]; then
 fi
 if [[ -n "$provider_only_override" ]]; then
   compose_files+=(-f "$provider_only_override")
+fi
+if [[ -n "$bounded_full_override" ]]; then
+  compose_files+=(-f "$bounded_full_override")
+  compose_files+=(-f "$release/compose.showcase.yaml")
 fi
 if [[ -n "$unified_bootstrap_override" ]]; then
   compose_files+=(-f "$unified_bootstrap_override")
@@ -964,6 +1087,9 @@ compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
   ${connector_profile_arg:+--profile connectors} \
   --project-directory "$release" "${compose_files[@]}")
 "${compose[@]}" config --quiet
+if [[ "$bounded_full" == true ]]; then
+  "${compose[@]}" build showcase-runtime
+fi
 
 unit="$HOME/.config/systemd/user/my-data-hub-control-plane.service"
 unit_candidate="$runtime_root/my-data-hub-control-plane.service.$commit"
@@ -1012,9 +1138,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$bounded_full_compose_arg$showcase_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service$showcase_services
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$bounded_full_compose_arg$showcase_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service$showcase_services
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$bounded_full_compose_arg$showcase_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -1136,6 +1262,10 @@ wait_http oauth-server http://127.0.0.1:8780/.well-known/oauth-authorization-ser
 if [[ "$connector_runtime" == true ]]; then
   wait_http connector-intake http://127.0.0.1:8081/health/ready
 fi
+if [[ "$bounded_full" == true ]]; then
+  wait_http showcase-runtime http://127.0.0.1:8790/health/ready
+  wait_http showcase-static http://127.0.0.1:8791/healthz
+fi
 
 ready_receipt="$runtime_root/ready.$commit.json"
 curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
@@ -1155,6 +1285,25 @@ if not (
     and receipt.get("data_plane_ready") is False
 ):
     raise SystemExit("provider-only readiness did not prove the central adapter gateway")
+PY
+fi
+if [[ "$bounded_full" == true ]]; then
+  python3 - <<'PY'
+import json
+import urllib.request
+
+expected = {
+    "platform:read", "provider:read", "provider:write",
+    "youtube:analyze", "showcase:read", "showcase:write",
+}
+request = urllib.request.Request(
+    "http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp",
+    headers={"Host": "mcp-datahub.kenigevents.ru"},
+)
+with urllib.request.urlopen(request, timeout=5) as response:
+    actual = set(json.load(response).get("scopes_supported", []))
+if actual != expected:
+    raise SystemExit(f"bounded full OAuth scopes differ: {sorted(actual)}")
 PY
 fi
 if [[ "$unified_bootstrap" == true ]]; then
@@ -1183,13 +1332,16 @@ rm -f "$unit_backup"
 rm -f "$supervisor_unit_backup"
 provider_only_mode="disabled"
 if [[ "$provider_only" == true ]]; then
-  provider_only_mode="provider-only-mcp"
+  provider_only_mode="bounded-full-mcp"
+  if [[ "$bounded_full" != true ]]; then
+    provider_only_mode="provider-only-mcp"
+  fi
 fi
 unified_bootstrap_mode="disabled"
 if [[ "$unified_bootstrap" == true ]]; then
   unified_bootstrap_mode="bounded-read-provider-autostart"
 fi
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s\noperator_profile=%s\nprovider_only_mode=%s\nunified_bootstrap_mode=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "$operator_profile" "$provider_only_mode" "$unified_bootstrap_mode" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s%s\noperator_profile=%s\nprovider_only_mode=%s\nunified_bootstrap_mode=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "${showcase_services// /,}" "$operator_profile" "$provider_only_mode" "$unified_bootstrap_mode" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"
 if [[ "$provider_only" == true ]]; then
   printf 'chatgpt_oauth_client_mode=cimd-public\n'
   if [[ -n "$provider_oauth_client_id" ]]; then

@@ -288,6 +288,22 @@ async def test_bounded_unified_owner_profile_lists_youtube_tool_without_operator
 
 
 @pytest.mark.asyncio
+async def test_bounded_full_owner_profile_lists_youtube_tool_without_operator_writes() -> None:
+    analyzer = Analyzer()
+    owner = identity(YOUTUBE_SCOPE)
+    server = create_server(
+        settings(operator=False),  # type: ignore[arg-type]
+        dependencies=YouTubeMCPDependencies(
+            base=MCPDependencies(bounded_full_profile_enabled=True),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
+        default_identity=owner,
+    )
+    assert YOUTUBE_TOOL_NAME in {tool.name for tool in await server.list_tools()}
+
+
+@pytest.mark.asyncio
 async def test_unified_profile_advertises_youtube_scope_before_incremental_authorization() -> None:
     analyzer = Analyzer()
     audit = Audit()

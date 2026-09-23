@@ -73,6 +73,7 @@ def _youtube_exposed(settings: Settings, dependencies: YouTubeMCPDependencies) -
     owner_profile = bool(
         settings.mcp_operator_profile_enabled
         or dependencies.base.unified_bootstrap_profile_enabled
+        or dependencies.base.bounded_full_profile_enabled
     )
     return bool(
         dependencies.feature_enabled

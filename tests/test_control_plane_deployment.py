@@ -411,6 +411,26 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert '"openid", "offline_access", "platform:read", "provider:read", "provider:write"' in source
     assert "!override" in source
 
+
+def test_bounded_full_action_preserves_provider_youtube_showcase_without_db_operator() -> None:
+    source = installer_source()
+    assert "INSTALL_MY_DATA_HUB_BOUNDED_FULL" in source
+    start = source.index('cat > "$bounded_full_override"')
+    end = source.index('chmod 600 "$bounded_full_override"', start)
+    override = source[start:end]
+    exact = "platform:read,provider:read,provider:write,youtube:analyze,showcase:read,showcase:write"
+    assert 'MY_DATA_HUB_MCP_BOUNDED_FULL_PROFILE_ENABLED: "true"' in override
+    assert 'MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "false"' in override
+    assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"' in override
+    assert 'MY_DATA_HUB_SHOWCASE_ENABLED: "true"' in override
+    assert f"MY_DATA_HUB_MCP_SCOPES: {exact}" in override
+    assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,{exact}" in override
+    for forbidden in ("data:write", "master:ensure", "region-talk:operate", "acceptance:operate"):
+        assert forbidden not in override
+    assert 'showcase_compose_arg=" -f $release/compose.showcase.yaml"' in source
+    assert "wait_http showcase-runtime" in source
+    assert "wait_http showcase-static" in source
+
     # Compose deliberately runs as the owning host UID rather than the image's
     # baked-in uid.  The official Kaggle SDK needs a writable HOME even when
     # legacy credentials arrive only through the environment; keep that home
