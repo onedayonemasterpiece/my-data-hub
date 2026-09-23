@@ -658,9 +658,9 @@ if [[ "$bounded_full" == true ]]; then
   require_regular_file "$showcase_runtime_token" "Showcase runtime gateway token"
   require_regular_file "$showcase_read_key" "Showcase read deploy key"
   require_regular_file "$showcase_write_key" "Showcase write deploy key"
-  require_regular_file "$showcase_runtime_env" "Showcase runtime environment"
+  require_private_file "$showcase_runtime_env" "Showcase runtime environment"
   require_regular_file "$showcase_known_hosts" "Showcase GitHub known-hosts"
-  for runtime_secret in "$showcase_runtime_token" "$showcase_read_key" "$showcase_write_key" "$showcase_runtime_env"; do
+  for runtime_secret in "$showcase_runtime_token" "$showcase_read_key" "$showcase_write_key"; do
     [[ "$(stat -c '%u:%g:%a' "$runtime_secret")" == "65532:65532:400" ]] || {
       echo "Showcase runtime secret must be owned by 65532:65532 with mode 0400: $runtime_secret" >&2
       exit 2
@@ -693,7 +693,7 @@ required = {"GOOGLE_AI_LIMITER_SUPABASE_URL", "GOOGLE_AI_LIMITER_SUPABASE_SERVIC
 if not required <= keys or not any(re.fullmatch(r"GOOGLE_API_KEY[0-9]*", key) for key in keys):
     raise SystemExit("bounded Google AI environment is incomplete")
 PY
-  "$docker_path" run --rm --user 0:0 \
+  "$docker_path" run --rm --user 0:0 --entrypoint python \
     -v "$showcase_edge_token:/edge-token:ro" \
     -v "$showcase_runtime_token:/runtime-token:ro" \
     -v "$showcase_runtime_env:/runtime.env:ro" \
