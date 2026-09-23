@@ -185,6 +185,7 @@ async def test_server_discovery_is_closed_operator_only_and_truthfully_annotated
     tool = tools[YOUTUBE_TOOL_NAME]
     assert tool.input_schema["additionalProperties"] is False
     assert set(tool.input_schema["required"]) == {"youtube_url", "idempotency_key"}
+    assert tool.input_schema["properties"]["max_output_tokens"]["maximum"] == 8192
     assert tool.annotations.read_only_hint is True
     assert tool.annotations.destructive_hint is False
     assert tool.annotations.idempotent_hint is False

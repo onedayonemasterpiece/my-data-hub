@@ -80,6 +80,12 @@ def _provider_error(body: Any, http_status: int) -> tuple[str | None, str, str |
             message = raw_message.casefold()[:2000]
     if http_status == 429:
         return code, "provider_429", "provider_quota_rejected"
+    normalized_code = code.casefold() if code is not None else ""
+    if http_status in {502, 503, 504} or normalized_code in {
+        "service_unavailable",
+        "unavailable",
+    }:
+        return code, "provider_unavailable", "provider_high_demand"
     public_markers = (
         "not public",
         "private video",

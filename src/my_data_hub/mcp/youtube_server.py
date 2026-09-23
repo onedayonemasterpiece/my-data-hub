@@ -191,6 +191,15 @@ def create_server(
         for tool in raw_tools:
             if tool.name == YOUTUBE_TOOL_NAME:
                 tool.input_schema["additionalProperties"] = False
+                properties = tool.input_schema.get("properties")
+                if isinstance(properties, dict):
+                    output_limit = properties.get("max_output_tokens")
+                    if isinstance(output_limit, dict):
+                        output_limit["maximum"] = getattr(
+                            settings,
+                            "google_youtube_max_output_tokens",
+                            8192,
+                        )
                 return [*base_tools, tool]
         raise RuntimeError("YouTube MCP tool registration is missing")
 

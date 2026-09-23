@@ -69,7 +69,7 @@ class GeminiYouTubeAnalyzer:
         if model not in self._config.allowed_models:
             raise GoogleAIError(GoogleAIErrorCode.UNSUPPORTED_MODEL)
         if request.max_output_tokens > self._config.max_output_tokens:
-            raise GoogleAIError(GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID)
+            raise GoogleAIError(GoogleAIErrorCode.MAX_OUTPUT_TOKENS_EXCEEDED)
         if model == "gemini-3.7-flash" and request.thinking_level is ThinkingLevel.MINIMAL:
             raise GoogleAIError(GoogleAIErrorCode.UNSUPPORTED_THINKING_LEVEL)
 
@@ -319,12 +319,16 @@ class GeminiYouTubeAnalyzer:
             ) from cooldown_error
         code = {
             "provider_429": GoogleAIErrorCode.PROVIDER_429,
+            "provider_unavailable": GoogleAIErrorCode.PROVIDER_UNAVAILABLE,
             "youtube_video_not_public": GoogleAIErrorCode.YOUTUBE_VIDEO_NOT_PUBLIC,
             "provider_rejected_video": GoogleAIErrorCode.PROVIDER_REJECTED_VIDEO,
         }[category]
         raise GoogleAIError(
             code,
-            retryable=code is GoogleAIErrorCode.PROVIDER_429,
+            retryable=code in {
+                GoogleAIErrorCode.PROVIDER_429,
+                GoogleAIErrorCode.PROVIDER_UNAVAILABLE,
+            },
             retry_after_ms=interaction.retry_after_ms,
             request_uid=lease.request_uid,
             interaction_id=interaction.interaction_id,

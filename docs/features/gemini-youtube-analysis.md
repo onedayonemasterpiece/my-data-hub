@@ -168,4 +168,6 @@ Immediate rollback/block conditions are capability mismatch, uncertain quota-sco
 - `model_limit_not_found`: requested stable model ID is absent or has non-positive limits.
 - `key_metadata_missing`: a candidate ENV name is not registered with key alias and quota scope, or reserve selected an unconfigured ENV name.
 - `key_secret_missing`: metadata selected a key but its secret is absent in the process environment; the unsent lease is released, or reconciliation is required if release cannot prove it was unsent.
+- `max_output_tokens_exceeded`: the client requested more output tokens than the deployed analyzer permits. The MCP discovery schema advertises the deployed limit so conforming clients can correct the request before quota is reserved.
+- `provider_unavailable`: Gemini returned an overload or temporary service-unavailable failure. The video URL was not rejected; the result is retryable and the sent attempt remains finalized in the shared ledger.
 - `finalization_failed`: provider send occurred but accounting finalization is unconfirmed; disable further calls and reconcile the request UID.

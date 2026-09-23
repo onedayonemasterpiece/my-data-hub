@@ -23,11 +23,13 @@ class GoogleAIErrorCode(StrEnum):
     PROVIDER_429 = "provider_429"
     PROVIDER_TIMEOUT = "provider_timeout"
     PROVIDER_NETWORK_ERROR = "provider_network_error"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     PROVIDER_REJECTED_VIDEO = "provider_rejected_video"
     YOUTUBE_VIDEO_NOT_PUBLIC = "youtube_video_not_public"
     INTERACTION_INCOMPLETE = "interaction_incomplete"
     RESPONSE_TOO_LARGE = "response_too_large"
     RESPONSE_SCHEMA_INVALID = "response_schema_invalid"
+    MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     USAGE_MISSING = "usage_missing"
     FINALIZATION_FAILED = "finalization_failed"
     RECONCILIATION_REQUIRED = "reconciliation_required"
@@ -54,11 +56,17 @@ _DEFAULT_MESSAGES: dict[GoogleAIErrorCode, str] = {
     GoogleAIErrorCode.PROVIDER_429: "Google rejected the request because provider quota is exhausted.",
     GoogleAIErrorCode.PROVIDER_TIMEOUT: "The Gemini request timed out after it was sent.",
     GoogleAIErrorCode.PROVIDER_NETWORK_ERROR: "The Gemini request failed at the network boundary.",
+    GoogleAIErrorCode.PROVIDER_UNAVAILABLE: (
+        "Gemini is temporarily unavailable or overloaded. Retry the request later."
+    ),
     GoogleAIErrorCode.PROVIDER_REJECTED_VIDEO: "Gemini rejected the supplied video reference.",
     GoogleAIErrorCode.YOUTUBE_VIDEO_NOT_PUBLIC: "The YouTube video is unavailable to public URL analysis.",
     GoogleAIErrorCode.INTERACTION_INCOMPLETE: "Gemini did not return a terminal completed interaction.",
     GoogleAIErrorCode.RESPONSE_TOO_LARGE: "The provider response exceeded the configured byte limit.",
     GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID: "The provider response did not satisfy the bounded result schema.",
+    GoogleAIErrorCode.MAX_OUTPUT_TOKENS_EXCEEDED: (
+        "The requested output-token limit exceeds the deployed YouTube analyzer limit."
+    ),
     GoogleAIErrorCode.USAGE_MISSING: "The provider response omitted required token usage.",
     GoogleAIErrorCode.FINALIZATION_FAILED: "Provider usage accounting could not be finalized.",
     GoogleAIErrorCode.RECONCILIATION_REQUIRED: "The sent provider attempt requires accounting reconciliation.",

@@ -423,6 +423,36 @@ async def test_non_success_sse_error_uses_terminal_event_diagnostic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_service_unavailable_terminal_event_is_not_misreported_as_video_rejection() -> None:
+    requester = Requester(
+        [
+            (
+                "error",
+                {
+                    "event_type": "error",
+                    "error": {
+                        "code": "service_unavailable",
+                        "message": "model is currently experiencing high demand",
+                    },
+                },
+            )
+        ]
+    )
+    result = await GeminiInteractionsClient(requester=requester).create(
+        api_key="secret-key",
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(),
+        model="gemini-3.7-flash",
+        on_interaction_started=lambda interaction_id, status: _record([], interaction_id, status),
+    )
+    assert result.status == "failed"
+    assert result.provider_error_code == "service_unavailable"
+    assert result.provider_error_category == "provider_unavailable"
+    assert result.provider_error_diagnostic == "provider_high_demand"
+    assert "high demand" not in repr(result)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
     [

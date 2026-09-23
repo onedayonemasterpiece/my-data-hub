@@ -288,6 +288,42 @@ async def test_provider_429_closes_scope_model_and_finalizes_attempt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_unavailable_is_retryable_and_not_a_video_rejection() -> None:
+    shared = Limiter()
+    provider = Interactions(
+        ProviderInteraction(
+            interaction_id=None,
+            model="gemini-3.6-flash",
+            status="failed",
+            structured_output=None,
+            output_text=None,
+            usage=None,
+            http_status=200,
+            provider_error_code="service_unavailable",
+            provider_error_category="provider_unavailable",
+            provider_error_diagnostic="provider_high_demand",
+        )
+    )
+    with pytest.raises(GoogleAIError) as caught:
+        await analyzer(shared, provider).analyze(arguments())
+    assert caught.value.code is GoogleAIErrorCode.PROVIDER_UNAVAILABLE
+    assert caught.value.retryable is True
+    assert caught.value.warnings == ("provider_diagnostic:provider_high_demand",)
+    assert shared.finalized[0]["provider_terminal_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_output_limit_rejection_is_request_specific_and_never_reserves_quota() -> None:
+    shared = Limiter()
+    provider = Interactions(completed(summary_output()))
+    with pytest.raises(GoogleAIError) as caught:
+        await analyzer(shared, provider).analyze(arguments(max_output_tokens=8193))
+    assert caught.value.code is GoogleAIErrorCode.MAX_OUTPUT_TOKENS_EXCEEDED
+    assert shared.events == []
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
 async def test_transcript_is_explicitly_model_generated_media_transcription() -> None:
     result = await analyzer(Limiter(), Interactions(completed(transcript_output()))).analyze(
         arguments(mode="transcript")
