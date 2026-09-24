@@ -1707,6 +1707,19 @@ class KaggleProviderAdapter:
             )
         return current
 
+    def read_latest_private_notebook_source_identity(
+        self, *, provider_ref: str
+    ) -> KaggleKernelSourceIdentity:
+        """Prove that a stable private notebook already exists for this owner."""
+        ref = _normalized_ref(provider_ref)
+        owner, _slug = ref.split("/", 1)
+        if owner != self.identity.username:
+            raise KagglePolicyError("stable notebook reuse is limited to the authenticated owner")
+        current, _provider_id = self._read_latest_private_notebook_identity(
+            ref, expected_source_sha256=None
+        )
+        return current
+
     def read_private_notebook_source_content(
         self,
         *,

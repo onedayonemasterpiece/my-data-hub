@@ -1323,8 +1323,13 @@ class KaggleMCPProviderGateway:
             raise ValueError("provider notebook disposable must be boolean")
         if enable_internet and sources:
             raise PermissionError("provider notebook internet is forbidden with private dataset inputs")
-        if (enable_internet or accelerator != "none") and not disposable:
-            raise PermissionError("networked or accelerated MCP notebooks must be disposable")
+        reuse_base = None
+        if not disposable:
+            if accelerator != "none":
+                raise PermissionError("accelerated MCP notebooks must be disposable")
+            reuse_base = self.adapter.read_latest_private_notebook_source_identity(
+                provider_ref=provider_ref
+            )
         expected_outputs = self._expected_outputs(payload.get("expected_outputs", []))
         arguments = {
             "task_run_id": str(task_run_id),
@@ -1362,6 +1367,14 @@ class KaggleMCPProviderGateway:
                 "enable_internet": enable_internet,
                 "accelerator": accelerator,
             },
+            "reuse_base": (
+                {
+                    "source_version": reuse_base.source_version,
+                    "source_sha256": reuse_base.source_sha256,
+                }
+                if reuse_base is not None
+                else None
+            ),
             "expected_outputs": list(expected_outputs),
         }
         self.ledger.register_provider_resource(
