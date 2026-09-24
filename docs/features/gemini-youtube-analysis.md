@@ -61,6 +61,13 @@ Optional:
 
 URL processing does not fetch the supplied URL. The service extracts and validates the 11-character video ID, removes only known tracking/start parameters, builds `https://www.youtube.com/watch?v=<id>`, and passes that URI to Google as a video data reference. HTTP, credentials, non-standard ports, fragments, IP addresses, localhost, arbitrary domains, redirects, playlists, and unknown query parameters are rejected.
 
+The deployed default is `gemini-3.5-flash-lite`, confirmed by a live completed
+YouTube interaction for the owner-reported video on 2026-09-24. The allowlist
+also retains `gemini-3.6-flash` and `gemini-3.7-flash` and permits
+`gemini-3.8-flash` as an explicit selection; the latter returned Google 503
+in the same incident and is not the default. These model choices do not alter
+the independently managed per-project quota ledger.
+
 ## Provider request and streaming
 
 The transport is direct asynchronous REST over `aiohttp`, not `google-genai`. One call to the transport performs exactly one physical `POST https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse`; redirects and automatic retries are disabled. The request uses `Api-Revision: 2026-05-20`, places the video block before the text block, places `resolution` on the video block when supplied, requests bounded structured JSON, and always sends `stream=true`, `background=false`, and `store=false`.

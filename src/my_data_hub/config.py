@@ -103,10 +103,12 @@ class Settings:
     orchestrator_database_url: str = ""
     canonical_committer_database_url: str = ""
     google_youtube_enabled: bool = False
-    google_youtube_model: str = "gemini-3.6-flash"
+    google_youtube_model: str = "gemini-3.5-flash-lite"
     google_youtube_allowed_models: tuple[str, ...] = (
+        "gemini-3.5-flash-lite",
         "gemini-3.6-flash",
         "gemini-3.7-flash",
+        "gemini-3.8-flash",
     )
     google_youtube_connect_timeout_seconds: int = 30
     google_youtube_first_event_timeout_seconds: int = 120
@@ -234,12 +236,12 @@ class Settings:
             ).strip(),
             google_youtube_enabled=_bool("MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED", False),
             google_youtube_model=os.getenv(
-                "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL", "gemini-3.6-flash"
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL", "gemini-3.5-flash-lite"
             ).strip(),
             google_youtube_allowed_models=_csv(
                 os.getenv(
                     "MY_DATA_HUB_GOOGLE_YOUTUBE_ALLOWED_MODELS",
-                    "gemini-3.6-flash,gemini-3.7-flash",
+                    "gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash",
                 )
             ),
             google_youtube_connect_timeout_seconds=_int(

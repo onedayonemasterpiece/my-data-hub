@@ -41,6 +41,13 @@ def test_feature_is_disabled_by_default_and_generic_supabase_is_not_fallback(mon
     assert settings.google_ai_limiter_supabase_url == ""
     assert settings.google_ai_limiter_supabase_service_key == ""
     assert settings.google_ai_normal_key_envs == ()
+    assert settings.google_youtube_model == "gemini-3.5-flash-lite"
+    assert settings.google_youtube_allowed_models == (
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+    )
     assert settings.google_youtube_connect_timeout_seconds == 30
     assert settings.google_youtube_first_event_timeout_seconds == 120
     assert settings.google_youtube_idle_timeout_seconds == 300
