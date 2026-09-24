@@ -52,12 +52,49 @@ class Contact(StrictModel):
         return value
 
 
+class LectureMetadata(StrictModel):
+    """Lecture authorship and external verification are independent of readiness."""
+
+    kind: Literal["master", "author"] = Field(
+        description="master: partner master lecture; author: author's lecture. Set from the lecture catalogue."
+    )
+    znanie_verified: bool = Field(
+        default=False,
+        strict=True,
+        description=(
+            "True only for confirmed verification by Russian society Znanie of the presented version. "
+            "Do not infer from publish_state, readiness, generic verification or a planned submission. "
+            "The verification chip is displayed only for author lectures, never for master lectures."
+        ),
+    )
+
+    def chips(self) -> list[dict[str, str]]:
+        if self.kind == "master":
+            return [{"label": "Мастер-лекция", "tone": "purple"}]
+        chips = [{"label": "Авторская", "tone": "neutral"}]
+        if self.znanie_verified:
+            chips.append({"label": "Верификация РО «Знание»", "tone": "green"})  # noqa: RUF001
+        return chips
+
+
 class ShowcaseItem(StrictModel):
     schema_version: Literal[1] = 1
     id: str = Field(pattern=_ID_PATTERN)
     title: str = Field(min_length=3, max_length=120, description="The reader's working task, not a technology name.")
     summary: str = Field(min_length=10, max_length=220, description="A short concrete deliverable.")
     audience: Label
+    audiences: list[Label] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Optional individual target audience chips. When set, replaces the legacy audience "
+            "in display and filtering; do not put several audiences in one label. "
+            "Keep adaptation details and qualifications in for_whom and requirements."
+        ),
+    )
+    lecture: LectureMetadata | None = Field(
+        default=None, description="Lecture cards only. Omit for tools and other offers; no type is inferred."
+    )
     category: Category
     capability_type: CapabilityType | None = None
     maturity: StatusLabel
@@ -80,11 +117,26 @@ class ShowcaseItem(StrictModel):
             raise ValueError("list entries must be unique")
         return cleaned
 
+    @field_validator("audiences")
+    @classmethod
+    def unique_audiences(cls, values: list[Label]) -> list[Label]:
+        if len({value.id for value in values}) != len(values):
+            raise ValueError("audience ids must be unique")
+        if len({value.label.casefold() for value in values}) != len(values):
+            raise ValueError("audience labels must be unique")
+        return values
+
+    def effective_audiences(self) -> list[Label]:
+        return self.audiences or [self.audience]
+
     def published(self, contact: Contact) -> dict[str, object]:
+        audiences = self.effective_audiences()
+        lecture_chips = self.lecture.chips() if self.lecture else []
         search_parts = [
             self.title,
             self.summary,
-            self.audience.label,
+            *(audience.label for audience in audiences),
+            *(chip["label"] for chip in lecture_chips),
             self.category.label,
             self.capability_type or "",
             self.maturity.label,
@@ -99,6 +151,8 @@ class ShowcaseItem(StrictModel):
             "title": self.title,
             "summary": self.summary,
             "audience": self.audience.model_dump(),
+            "audiences": [audience.model_dump() for audience in audiences],
+            "lecture_chips": lecture_chips,
             "category": self.category.model_dump(),
             "capability_type": self.capability_type,
             "maturity": self.maturity.model_dump(),

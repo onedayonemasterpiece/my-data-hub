@@ -1,0 +1,18 @@
+---
+import Badge from './Badge.astro';
+const { item } = Astro.props;
+const lectureChips = item.lecture_chips || [];
+const audiences = item.audiences?.length ? item.audiences : [item.audience];
+---
+<div class="card-chips">
+  {lectureChips.length > 0 && <div class="chip-row lecture-chips" role="group" aria-label="Тип и верификация лекции">
+    {lectureChips.map((chip) => <Badge label={chip.label} tone={chip.tone} />)}
+  </div>}
+  <div class="chip-row audience-chips" role="group" aria-label="Целевая аудитория">
+    {audiences.map((audience) => <Badge label={audience.label} tone="neutral" />)}
+  </div>
+</div>
+<style>
+  .card-chips { display: grid; gap: 8px; min-width: 0; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+</style>
