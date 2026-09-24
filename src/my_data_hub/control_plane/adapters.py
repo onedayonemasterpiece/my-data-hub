@@ -980,6 +980,8 @@ class KaggleMCPProviderGateway:
     def invoke(self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "provider.inventory.live":
             return self._live_inventory(arguments, principal)
+        if tool == "provider.notebook.source.read":
+            return self._read_notebook_source(arguments, principal)
         if tool.startswith("provider.upload."):
             return self._upload(tool, arguments, principal)
         provider_ref = str(arguments.get("resource_ref", ""))
@@ -1127,6 +1129,41 @@ class KaggleMCPProviderGateway:
             "count": len(resources),
             "bounded": True,
             "complete": True,
+        }
+
+    def _read_notebook_source(
+        self, arguments: Mapping[str, Any], principal: AccessIdentity
+    ) -> dict[str, Any]:
+        if set(arguments) != {
+            "resource_ref",
+            "private",
+            "source_version",
+            "expected_source_sha256",
+        }:
+            raise ValueError("provider notebook source read requires exact arguments")
+        if arguments.get("private") is not True:
+            raise PermissionError("provider notebook source read accepts private resources only")
+        if "provider:write" not in principal.scopes:
+            raise PermissionError("provider notebook source read requires the provider operator scope")
+        provider_ref = str(arguments.get("resource_ref", ""))
+        owner, separator, _slug = provider_ref.partition("/")
+        if not separator or owner != self.adapter.provider_identity().username:
+            raise PermissionError("provider notebook source read is limited to the authenticated owner")
+        source_version = arguments.get("source_version")
+        if isinstance(source_version, bool) or not isinstance(source_version, int) or source_version < 1:
+            raise ValueError("provider notebook source version must be positive")
+        expected_sha = str(arguments.get("expected_source_sha256", ""))
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+            raise ValueError("provider notebook source expected SHA-256 is invalid")
+        observed = self.adapter.read_private_notebook_source_content(
+            provider_ref=provider_ref,
+            source_version=source_version,
+            expected_source_sha256=expected_sha,
+        )
+        return {
+            "provider_ref": provider_ref,
+            "private": True,
+            **observed,
         }
 
     def _create(
@@ -2484,6 +2521,7 @@ class LedgerControlReader(ControlPlaneReader):
             "provider.resources.list",
             "provider.resources.download",
             "provider.inventory.live",
+            "provider.notebook.source.read",
             "provider.resources.delete",
             "provider.upload.start",
             "provider.upload.put_chunk",

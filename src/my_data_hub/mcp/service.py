@@ -63,6 +63,7 @@ _CONTROL_TOOLS = frozenset(
         "provider.resources.list",
         "provider.resources.download",
         "provider.inventory.live",
+        "provider.notebook.source.read",
         "provider.upload.status",
         "provider.acceptance.claim.get",
         "runtime.events.history",

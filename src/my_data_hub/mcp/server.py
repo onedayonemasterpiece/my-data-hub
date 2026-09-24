@@ -106,6 +106,7 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.resources.list",
         "provider.resources.download",
         "provider.inventory.live",
+        "provider.notebook.source.read",
         "provider.resources.delete",
         "provider.upload.start",
         "provider.upload.put_chunk",
@@ -874,6 +875,23 @@ def create_server(
     async def provider_inventory_live(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.inventory.live", {"limit": limit})
 
+    async def provider_notebook_source_read(
+        resource_ref: str,
+        private: Literal[True],
+        source_version: int,
+        expected_source_sha256: str,
+    ) -> dict[str, Any]:
+        """Read exact UTF-8 source of an existing private notebook by version and SHA-256."""
+        return await service.invoke(
+            "provider.notebook.source.read",
+            {
+                "resource_ref": resource_ref,
+                "private": private,
+                "source_version": source_version,
+                "expected_source_sha256": expected_source_sha256,
+            },
+        )
+
     async def provider_upload_start(
         resource_ref: str,
         control_class: Literal["mcp_managed"],
@@ -976,6 +994,7 @@ def create_server(
         "provider.resources.list": provider_resources_list,
         "provider.resources.download": provider_resources_download,
         "provider.inventory.live": provider_inventory_live,
+        "provider.notebook.source.read": provider_notebook_source_read,
         "provider.resources.delete": provider_resources_delete,
         "provider.upload.start": provider_upload_start,
         "provider.upload.put_chunk": provider_upload_put_chunk,

@@ -167,6 +167,13 @@ _WRITES = (
         role="provider_operator",
     ),
     ToolContract(
+        "provider.notebook.source.read",
+        "provider:write",
+        True,
+        open_world=True,
+        role="provider_operator",
+    ),
+    ToolContract(
         "provider.acceptance.dataset.lifecycle",
         "provider:write",
         False,

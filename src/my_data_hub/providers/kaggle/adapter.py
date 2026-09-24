@@ -1707,6 +1707,67 @@ class KaggleProviderAdapter:
             )
         return current
 
+    def read_private_notebook_source_content(
+        self,
+        *,
+        provider_ref: str,
+        source_version: int,
+        expected_source_sha256: str,
+        max_bytes: int = 262_144,
+    ) -> dict[str, object]:
+        """Return one exact private notebook source through the pinned Kaggle SDK."""
+        ref = _normalized_ref(provider_ref)
+        if source_version < 1:
+            raise KaggleContractError("source_version must be positive")
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_source_sha256):
+            raise KaggleContractError("expected_source_sha256 must be lowercase SHA-256")
+        if not 1 <= max_bytes <= 262_144:
+            raise KaggleContractError("source max_bytes is outside the bounded contract")
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-source-content-") as temporary:
+            folder = Path(temporary)
+            pulled, _ = self.retry.call(
+                "kernels_pull",
+                lambda: self.api.kernels_pull(
+                    f"{ref}/{source_version}",
+                    path=str(folder),
+                    metadata=True,
+                    quiet=True,
+                ),
+            )
+            if Path(str(pulled)).resolve() != folder.resolve():
+                raise KaggleContractError("Kaggle source pull escaped the bounded target directory")
+            metadata_path = folder / "kernel-metadata.json"
+            if not metadata_path.is_file():
+                raise KaggleIdentityError("Kaggle source readback omitted exact kernel metadata")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("id") != ref or metadata.get("is_private") is not True:
+                raise KagglePolicyError("notebook exact identity/privacy was not proven")
+            code_file = str(metadata.get("code_file") or "")
+            _validate_relative_path(code_file)
+            source_path = folder.joinpath(*code_file.split("/"))
+            if not source_path.is_file() or folder not in source_path.parents:
+                raise KaggleContractError("Kaggle source pull did not return a bounded local file")
+            source = source_path.read_bytes()
+            if len(source) > max_bytes:
+                raise KaggleContractError("Kaggle notebook source exceeds the bounded read contract")
+            kernel_type = str(metadata.get("kernel_type") or "")
+            source_sha = executable_source_sha256(source, kernel_type=kernel_type)
+            if source_sha != expected_source_sha256:
+                raise KaggleIdentityError("Kaggle source readback differs from the expected SHA-256")
+            try:
+                source_utf8 = source.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise KaggleContractError("Kaggle notebook source is not UTF-8") from exc
+            return {
+                "source_utf8": source_utf8,
+                "source_sha256": source_sha,
+                "source_version": source_version,
+                "code_file": code_file,
+                "kernel_type": kernel_type,
+                "language": str(metadata.get("language") or ""),
+                "byte_size": len(source),
+            }
+
     def _pull_private_notebook_source(self, ref: str, source_version: int | None) -> tuple[str, int]:
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-source-") as temporary:
             folder = Path(temporary)
