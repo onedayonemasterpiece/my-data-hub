@@ -165,6 +165,16 @@ class VoiceIntakeV2Store:
                 );
                 CREATE INDEX IF NOT EXISTS sessions_work_idx
                   ON sessions(state, lease_until, retry_at, updated_at);
+                CREATE TABLE IF NOT EXISTS inference_failures (
+                    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                    stage TEXT NOT NULL,
+                    request_uid TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    http_status INTEGER,
+                    finish_reason TEXT,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(session_id,stage,request_uid)
+                );
                 """
             )
             columns = {
@@ -398,7 +408,13 @@ class VoiceIntakeV2Store:
                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["retry_at"]))
                     if row["retry_at"] is not None else None
                 ),
-                error_code=row["error_code"],
+                # Installed Android clients classify the legacy schema code as
+                # manual reconciliation before looking at retryable=true.
+                error_code=(
+                    "provider_output_retry_pending"
+                    if row["error_code"] == "response_schema_invalid" and row["retryable"]
+                    and not row["reconciliation_required"] else row["error_code"]
+                ),
                 reconciliation_required=bool(row["reconciliation_required"]),
                 transcription_request_uid=row["transcript_request_uid"],
                 summary_request_uid=row["summary_request_uid"],
@@ -468,9 +484,11 @@ class VoiceIntakeV2Store:
                 )
                 try:
                     saved = checkpoint.load()
+                    failed = checkpoint.load_failure()
                 except CheckpointError:
                     saved = None
-                if saved is not None:
+                    failed = None
+                if saved is not None or failed is not None:
                     state, error, reconcile = "queued", None, 0
                 else:
                     state, error, reconcile = "reconciliation_required", "provider_outcome_ambiguous", 1
@@ -532,6 +550,34 @@ class VoiceIntakeV2Store:
         if row["transcript_json"] is None:
             return "transcript", int(row["transcript_attempts"])
         return "summary", int(row["summary_attempts"])
+
+    def record_inference_failure(
+        self, session_id: str, owner: str, *, stage: str, request_uid: str,
+        code: str, diagnostics: dict[str, Any],
+    ) -> int:
+        """Persist safe failure metadata, deduplicating recovery of one receipt.
+
+        HTTP outages must not consume the separate malformed-output budget.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM sessions WHERE session_id=? AND lease_owner=? AND lease_until>?",
+                (session_id, owner, self._clock()),
+            ).fetchone()
+            if row is None:
+                raise StoreError("worker_lease_lost")
+            connection.execute(
+                """INSERT OR IGNORE INTO inference_failures
+                   (session_id,stage,request_uid,code,http_status,finish_reason,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (session_id, stage, request_uid, code, diagnostics.get("http_status"),
+                 diagnostics.get("finish_reason"), self._clock()),
+            )
+            row = connection.execute(
+                """SELECT COUNT(*) FROM inference_failures WHERE session_id=? AND stage=?
+                   AND code='response_schema_invalid'""", (session_id, stage),
+            ).fetchone()
+            return int(row[0])
 
     def persist_transcript(
         self, session_id: str, owner: str, value: dict[str, Any], request_uid: str,

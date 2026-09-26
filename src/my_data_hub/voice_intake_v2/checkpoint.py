@@ -55,6 +55,7 @@ class StageCheckpoint:
         if stage not in {"transcript", "summary"}:
             raise ValueError("invalid checkpoint stage")
         self.path = directory / f"{stage}.receipt.json"
+        self.failure_path = directory / f"{stage}.failure.json"
         self.identity = {
             "version": 1, "session_id": session_id, "stage": stage,
             "manifest_sha256": manifest_sha,
@@ -62,8 +63,53 @@ class StageCheckpoint:
         self._before_send = before_send
 
     def dispatch(self) -> None:
+        # An older definite failure must never authorize recovery of a new send.
+        self.clear_failure()
         if self._before_send is not None:
             self._before_send()
+
+    def clear_failure(self) -> None:
+        if self.failure_path.exists():
+            self.failure_path.unlink()
+            descriptor = os.open(self.failure_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def save_failure(self, failure: dict[str, Any], accounting: dict[str, Any] | None) -> None:
+        payload = {**self.identity, "failure": failure, "accounting": accounting}
+        atomic_json(self.failure_path, {**payload, "sha256": fingerprint(payload)})
+
+    def load_failure(self) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        try:
+            if not self.failure_path.exists():
+                return None
+            if self.failure_path.is_symlink() or self.failure_path.stat().st_size > 128 * 1024:
+                raise CheckpointError("failure_checkpoint_invalid")
+            payload = json.loads(self.failure_path.read_text(encoding="utf-8"))
+            digest = payload.pop("sha256", None)
+            if digest != fingerprint(payload) or any(
+                payload.get(key) != value for key, value in self.identity.items()
+            ):
+                raise CheckpointError("failure_checkpoint_identity_mismatch")
+            failure, accounting = payload["failure"], payload["accounting"]
+            if (
+                not isinstance(failure, dict)
+                or not isinstance(failure.get("code"), str)
+                or failure.get("sent") is not True
+                or failure.get("ambiguous") is not False
+                or not isinstance(failure.get("retryable"), bool)
+                or not isinstance(failure.get("request_uid"), str)
+                or (accounting is not None and (
+                    not isinstance(accounting, dict)
+                    or accounting.get("lease", {}).get("request_uid") != failure["request_uid"]
+                ))
+            ):
+                raise CheckpointError("failure_checkpoint_invalid")
+            return failure, accounting
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise CheckpointError("failure_checkpoint_unreadable") from exc
 
     def save(self, receipt: InferenceReceipt, accounting: dict[str, Any] | None = None) -> None:
         payload = {

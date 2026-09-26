@@ -203,8 +203,11 @@ async def test_schema_failure_retries_are_durable_and_bounded(
         assert await worker.process_once()
         status = store.status(SESSION_ID)
         assert status.retryable is (expected_attempt < 3)
+        assert status.error_code == (
+            "provider_output_retry_pending" if expected_attempt < 3 else "response_schema_invalid"
+        )
         if expected_attempt < 3:
-            now[0] += 61
+            now[0] += 60 * 2 ** (expected_attempt - 1) + 1
 
     assert not await worker.process_once()
     assert inference.calls == ["transcribe"] * 3

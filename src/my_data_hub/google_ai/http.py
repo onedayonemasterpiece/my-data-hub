@@ -11,8 +11,10 @@ import aiohttp
 
 
 class BoundedHTTPError(RuntimeError):
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, *, status: int | None = None, retry_after: str | None = None) -> None:
         self.kind = kind
+        self.status = status
+        self.retry_after = retry_after
         super().__init__(kind)
 
 
@@ -179,7 +181,10 @@ class AiohttpBoundedJSONRequester:
                     try:
                         parsed = json.loads(body.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise BoundedHTTPError("malformed_json") from exc
+                        raise BoundedHTTPError(
+                            "malformed_json", status=response.status,
+                            retry_after=response.headers.get("Retry-After"),
+                        ) from exc
                 return BoundedHTTPResponse(
                     status=response.status,
                     json_body=parsed,

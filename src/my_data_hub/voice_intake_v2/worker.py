@@ -36,6 +36,7 @@ class StageFailure(RuntimeError):
         self, code: str, *, sent: bool, retryable: bool = False,
         retry_after_seconds: int | None = None, ambiguous: bool = False,
         diagnostics: dict[str, Any] | None = None,
+        request_uid: str | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -44,6 +45,7 @@ class StageFailure(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.ambiguous = ambiguous
         self.diagnostics = dict(diagnostics or {})
+        self.request_uid = request_uid
 
 
 class AggregateInference(Protocol):
@@ -120,6 +122,11 @@ class VoiceIntakeV2Worker:
             stage, attempt = self.store.active_inference_attempt(
                 session.session_id, self.owner
             )
+            schema_failures = self.store.record_inference_failure(
+                session.session_id, self.owner, stage=stage,
+                request_uid=exc.request_uid or f"{stage}-{attempt}", code=exc.code,
+                diagnostics=exc.diagnostics,
+            )
             if exc.diagnostics:
                 diagnostic = exc.diagnostics
                 LOGGER.warning(
@@ -127,7 +134,7 @@ class VoiceIntakeV2Worker:
                     "schema_version=%s json_path=%s expected=%s actual=%s "
                     "missing_fields=%s extra_fields=%s finish_reason=%s token_counts=%s "
                     "configured_max_output_tokens=%s truncated=%s stage=%s attempt=%s "
-                    "max_attempts=%s",
+                    "max_attempts=%s http_status=%s",
                     session.session_id,
                     exc.code,
                     diagnostic.get("schema"),
@@ -144,29 +151,37 @@ class VoiceIntakeV2Worker:
                     stage,
                     attempt,
                     self.settings.schema_failure_max_attempts,
+                    diagnostic.get("http_status"),
                 )
             ambiguous = exc.ambiguous
             # A received/finalized 429 is a known quota rejection, not an
             # unknown generation outcome. Keep it recoverable through the
             # shared limiter; no immediate retry occurs inside the adapter.
-            bounded_schema_retry = (
-                exc.code == "response_schema_invalid"
-                and exc.sent
-                and exc.retryable
-                and attempt < self.settings.schema_failure_max_attempts
-            )
-            safe_retry = not ambiguous and exc.retryable and (
-                not exc.sent or exc.code == "provider_429" or bounded_schema_retry
-            )
+            # The adapter owns classification: retryable + non-ambiguous means
+            # a known safe failure. Do not override it with a second whitelist.
+            safe_retry = not ambiguous and exc.retryable
+            if exc.code == "response_schema_invalid":
+                safe_retry = safe_retry and schema_failures < self.settings.schema_failure_max_attempts
+            delay = max(30, exc.retry_after_seconds or 0)
+            if exc.sent:
+                delay = max(delay, min(900, 60 * 2 ** min(max(attempt - 1, 0), 4)))
             retry_at = (
-                self._clock() + (exc.retry_after_seconds or (60 if exc.sent else 30))
+                self._clock() + delay
                 if safe_retry else None
+            )
+            LOGGER.log(
+                logging.WARNING if safe_retry else logging.ERROR,
+                "voice_v2_recovery session_id=%s stage=%s code=%s attempt=%s "
+                "schema_failures=%s retryable=%s retry_at=%s reconciliation_required=%s",
+                session.session_id, stage, exc.code, attempt, schema_failures,
+                safe_retry, retry_at, ambiguous,
             )
             self.store.mark_error(
                 session.session_id, self.owner, code=exc.code,
                 retryable=safe_retry, retry_at=retry_at,
                 reconciliation_required=ambiguous,
             )
+            self._checkpoint(session, stage).clear_failure()
         except VoiceIntakeError as exc:
             retry_at = (
                 self._clock() + (exc.retry_after_seconds or 30)
@@ -236,6 +251,15 @@ class VoiceIntakeV2Worker:
     async def _restore(self, checkpoint: StageCheckpoint) -> InferenceReceipt | None:
         saved = checkpoint.load()
         if saved is None:
+            failed = checkpoint.load_failure()
+            if failed is not None:
+                failure, accounting = failed
+                if accounting is not None:
+                    resume = getattr(self.inference, "resume_failure", None)
+                    if resume is None:
+                        raise CheckpointError("failure_accounting_recovery_unavailable")
+                    await resume(checkpoint)
+                raise StageFailure(**failure)
             return None
         receipt, accounting = saved
         if accounting is not None:
