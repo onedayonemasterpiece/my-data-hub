@@ -165,11 +165,33 @@ not full model TPM. Pre-send quota denial makes zero provider POSTs. After
 `mark_sent`, there is no hidden retry inside the provider adapter: timeout or
 another ambiguous outcome enters `reconciliation_required`. A definitively
 received but malformed, truncated, or `RECITATION` response is not ambiguous;
-the worker durably counts the physical POST and may schedule another attempt,
-up to three attempts per stage. Safety and policy blocks are not retried.
-Provider 429 consumes exactly the one sent attempt and is reported through the
-limiter. Summary retry repeats only the summary; GitHub retry repeats neither
-inference stage.
+the worker may schedule another attempt, up to three malformed-output failures
+per stage. HTTP outages do not consume that budget. Safety and policy blocks
+are not retried. Definite HTTP 408, 429 and 5xx responses remain recoverable
+without an attempt-count cutoff, with exponential delays from 60 seconds to
+15 minutes and respect for longer numeric Retry-After (bounded to one day).
+Every attempt passes the shared limiter and has its own request UID.
+Permanent 4xx failures retain audio and require a configuration/input repair.
+
+Both successful responses and definite failures are saved before limiter
+finalization. Private manifest-bound `*.failure.json` receipts survive crashes
+and accounting outages; accounting replay uses the original request UID and
+does not send audio again. The old failure receipt is durably removed before
+a new send boundary so it cannot authorize replay of an ambiguous new attempt.
+SQLite `inference_failures` retains request UID, stage, code, HTTP status and
+finish reason without response content or secrets. Terminal decisions are
+logged at ERROR; retries include their durable deadline. Summary retry repeats
+only the summary; GitHub retry repeats neither inference stage.
+
+On the installed Android client a session already marked "Требуется безопасная
+сверка" is excluded from automatic polling. After an operator restores the
+server session, tap "Повторить сейчас" once to fetch its completed status.
+While an invalid-output retry is scheduled, the public status uses
+`provider_output_retry_pending`; the original `response_schema_invalid` remains
+in the server ledger. The installed client treats the original code as manual
+reconciliation regardless of `retryable=true`, so exposing it prematurely would
+stop polling even though the server is recovering. Exhausted/blocked output
+failures retain the original terminal code.
 
 ## Completion, publication and purge
 

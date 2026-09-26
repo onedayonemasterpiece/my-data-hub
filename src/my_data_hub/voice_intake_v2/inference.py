@@ -36,7 +36,7 @@ from my_data_hub.voice_intake.gemini import (
 )
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
 
-from .checkpoint import AccountingPending, StageCheckpoint
+from .checkpoint import AccountingPending, CheckpointError, StageCheckpoint
 from .contracts import InferenceReceipt
 from .worker import StageFailure
 
@@ -197,15 +197,10 @@ class AggregateGeminiInference:
                 timeout_seconds=float(self.settings.provider_timeout_seconds),
                 max_response_bytes=self.settings.max_json_bytes,
             )
-            response_body = response.json_body
-            usage = self._usage(response_body)
+            response_body = response.json_body if isinstance(response.json_body, dict) else {}
             if not 200 <= response.status < 300:
-                if response.status == 429:
-                    await self.limiter.report_provider_429(lease, retry_after_ms=None)
-                raise StageFailure(
-                    "provider_429" if response.status == 429 else "provider_rejected_request",
-                    sent=True, retryable=response.status == 429 or response.status >= 500,
-                )
+                raise self._http_failure(response.status, response.retry_after)
+            usage = self._usage(response_body)
             finish_reason = self._finish_reason(response_body)
             if finish_reason not in {"STOP", "UNSPECIFIED"}:
                 raise StageFailure(
@@ -228,18 +223,26 @@ class AggregateGeminiInference:
             parsed_value = self._json_value(response_body)
             value = output_type.model_validate(parsed_value)
         except StageFailure as exc:
-            error = "response_schema_invalid" if exc.code == "response_schema_invalid" else "provider_failure"
-            await self._finalize(lease, started, usage, "failed", error)
+            await self._record_failure(checkpoint, exc, lease, started, usage)
             raise
         except (TimeoutError, BoundedHTTPError) as exc:
+            if isinstance(exc, BoundedHTTPError) and exc.kind == "malformed_json" and exc.status is not None:
+                # A fully received HTML/empty error response is a definite HTTP
+                # failure, even if a proxy did not encode its body as JSON.
+                failure = (
+                    self._http_failure(exc.status, exc.retry_after)
+                    if not 200 <= exc.status < 300 else
+                    StageFailure("response_schema_invalid", sent=True, retryable=True)
+                )
+                await self._record_failure(checkpoint, failure, lease, started, usage)
+                raise failure from exc
             await self._finalize(lease, started, usage, "failed", "provider_outcome_ambiguous")
             raise StageFailure(
                 "provider_timeout" if "timeout" in str(exc).lower() else "provider_network_error",
-                sent=True, retryable=False, ambiguous=True,
+                sent=True, retryable=False, ambiguous=True, request_uid=request_uid,
             ) from exc
-        except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            await self._finalize(lease, started, usage, "failed", "response_schema_invalid")
-            raise StageFailure(
+        except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+            failure = StageFailure(
                 "response_schema_invalid",
                 sent=True,
                 retryable=True,
@@ -253,7 +256,9 @@ class AggregateGeminiInference:
                     usage=usage,
                     max_output_tokens=max_output_tokens,
                 ),
-            ) from exc
+            )
+            await self._record_failure(checkpoint, failure, lease, started, usage)
+            raise failure from exc
         public = self.limiter.public_lease(lease, actual_tpm=usage.total_tokens if usage else None)
         receipt = InferenceReceipt(value=value.model_dump(mode="json"), request_uid=request_uid, limiter=public)
         if checkpoint is None:
@@ -265,6 +270,57 @@ class AggregateGeminiInference:
         })
         # The response and request identity survive even if the limiter is down.
         return await self.resume_receipt(checkpoint)
+
+    @staticmethod
+    def _http_failure(status: int, retry_after: str | None) -> StageFailure:
+        delay = int(retry_after) if retry_after and retry_after.isdigit() else None
+        return StageFailure(
+            "provider_429" if status == 429 else "provider_rejected_request",
+            sent=True, retryable=status in {408, 429} or 500 <= status < 600,
+            retry_after_seconds=min(delay, 86400) if delay is not None else None,
+            diagnostics={"http_status": status},
+        )
+
+    async def _record_failure(
+        self, checkpoint: StageCheckpoint | None, failure: StageFailure,
+        lease: LimiterLease, started: float, usage: ModelUsage | None,
+    ) -> None:
+        error = "response_schema_invalid" if failure.code == "response_schema_invalid" else "provider_failure"
+        failure.request_uid = lease.request_uid
+        if checkpoint is None:
+            if failure.code == "provider_429":
+                await self.limiter.report_provider_429(lease, retry_after_ms=None)
+            await self._finalize(lease, started, usage, "failed", error)
+            return
+        checkpoint.save_failure({
+            "code": failure.code, "sent": failure.sent, "retryable": failure.retryable,
+            "ambiguous": failure.ambiguous, "retry_after_seconds": failure.retry_after_seconds,
+            "diagnostics": failure.diagnostics, "request_uid": lease.request_uid,
+        }, {
+            "lease": asdict(lease), "usage": usage.model_dump(mode="json") if usage else None,
+            "duration_ms": int((self.clock() - started) * 1000), "error_code": error,
+        })
+        await self.resume_failure(checkpoint)
+
+    async def resume_failure(self, checkpoint: StageCheckpoint) -> None:
+        saved = checkpoint.load_failure()
+        if saved is None:
+            raise CheckpointError("missing_failure_checkpoint")
+        failure, accounting = saved
+        if accounting is not None:
+            lease = LimiterLease(**accounting["lease"])
+            usage = ModelUsage.model_validate(accounting["usage"]) if accounting["usage"] else None
+            try:
+                if failure["code"] == "provider_429":
+                    await self.limiter.report_provider_429(lease, retry_after_ms=None)
+                await self.limiter.finalize_generate_content(
+                    lease, usage=usage, duration_ms=accounting["duration_ms"],
+                    provider_status="failed", error_type="provider",
+                    error_code=accounting["error_code"], error_message=accounting["error_code"],
+                )
+            except Exception as exc:
+                raise AccountingPending("failure_accounting_pending") from exc
+            checkpoint.save_failure(failure, None)
 
     async def resume_receipt(self, checkpoint: StageCheckpoint) -> InferenceReceipt:
         saved = checkpoint.load()

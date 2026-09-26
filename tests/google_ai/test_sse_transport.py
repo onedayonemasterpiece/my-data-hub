@@ -8,6 +8,7 @@ import pytest
 from aiohttp import web
 
 from my_data_hub.google_ai.http import (
+    AiohttpBoundedJSONRequester,
     AiohttpBoundedSSERequester,
     BoundedHTTPError,
     IncrementalSSEParser,
@@ -70,6 +71,22 @@ async def _server(handler: Callable[[web.Request], Awaitable[web.StreamResponse]
 
 async def _ignore(_event: SSEEvent) -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_non_json_http_error_retains_status_and_retry_after_without_body():
+    async def handler(request):
+        return web.Response(status=503, text="PRIVATE proxy error", headers={"Retry-After": "120"})
+
+    async with _server(handler) as url:
+        with pytest.raises(BoundedHTTPError) as raised:
+            await AiohttpBoundedJSONRequester().request_json(
+                "POST", url, headers={}, json_body={}, timeout_seconds=5, max_response_bytes=1024,
+            )
+    assert raised.value.kind == "malformed_json"
+    assert raised.value.status == 503
+    assert raised.value.retry_after == "120"
+    assert "PRIVATE" not in str(raised.value)
 
 
 async def _call(url: str, timeouts: StreamTimeouts, *, max_raw_bytes: int = 1024) -> None:
