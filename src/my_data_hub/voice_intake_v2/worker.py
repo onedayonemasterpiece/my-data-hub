@@ -92,6 +92,7 @@ class VoiceIntakeV2Worker:
         if self._task is None or self._task.done():
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="voice-intake-v2-worker")
+            LOGGER.info("voice_v2_worker_started component=voice-intake-v2 worker_id=%s", self.owner)
 
     async def stop(self) -> None:
         self._stop.set()
