@@ -72,3 +72,18 @@ def test_spool_initialization_failure_keeps_existing_v1_application_available(
     assert response.status_code == 503
     assert response.json()["api_version"] == "2.0"
     assert response.json()["detail"]["code"] == "spool_unavailable"
+
+
+def test_runtime_enables_worker_completion_and_recovery_logging(monkeypatch):
+    import uvicorn
+    from uvicorn.config import LOGGING_CONFIG
+    from my_data_hub.voice_intake import runtime as server
+    app = object()
+    monkeypatch.setattr(server, 'create_voice_control_app', lambda settings: app)
+    captured = {}
+    monkeypatch.setattr(uvicorn, 'run', lambda application, **kwargs: captured.update(kwargs))
+    server.serve()
+    logger = captured['log_config']['loggers']['my_data_hub.voice_intake_v2.worker']
+    assert logger['level'] == 'INFO' and logger['handlers'] == ['default']
+    assert not logger['propagate']
+    assert 'my_data_hub.voice_intake_v2.worker' not in LOGGING_CONFIG['loggers']
