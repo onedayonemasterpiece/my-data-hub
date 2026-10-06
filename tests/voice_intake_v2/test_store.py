@@ -141,3 +141,25 @@ def test_claim_after_waiting_quota_clears_stale_error_fields(
     assert not status.retryable
     assert status.retry_at is None
     assert status.error_code is None
+
+
+@pytest.mark.parametrize('code', ['provider_rejected_request', 'provider_unavailable'])
+def test_provider_retry_status_survives_restart_with_server_clock(
+    tmp_path, create_request, complete_request, terminology, code,
+):
+    from .test_worker import queued
+    store = queued(tmp_path, create_request, complete_request, terminology)
+    now = store._clock()
+    store._clock = lambda: now
+    assert store.claim('worker', 60)
+    store.mark_error(SESSION_ID, 'worker', code=code, retryable=True, retry_at=now + 75.2)
+    restarted = VoiceIntakeV2Store(store.root, clock=lambda: now + 10)
+    status = restarted.status(SESSION_ID)
+    assert status.retry_after_seconds == 66
+    assert status.retryable and not status.reconciliation_required
+    assert 'автоматически' in status.status_message
+    assert (store.session_directory(SESSION_ID) / 'chunks').is_dir()
+    assert not restarted.claim('worker-2', 60)
+    assert VoiceIntakeV2Store(store.root, clock=lambda: now + 76).claim('worker-2', 60)
+    assert restarted.status(SESSION_ID).status_message is None
+    assert restarted.status(SESSION_ID).retry_after_seconds is None
