@@ -134,7 +134,7 @@ class VoiceIntakeV2Worker:
                     "schema_version=%s json_path=%s expected=%s actual=%s "
                     "missing_fields=%s extra_fields=%s finish_reason=%s token_counts=%s "
                     "configured_max_output_tokens=%s truncated=%s stage=%s attempt=%s "
-                    "max_attempts=%s http_status=%s",
+                    "max_attempts=%s http_status=%s provider_status=%s request_uid=%s model=%s",
                     session.session_id,
                     exc.code,
                     diagnostic.get("schema"),
@@ -152,6 +152,9 @@ class VoiceIntakeV2Worker:
                     attempt,
                     self.settings.schema_failure_max_attempts,
                     diagnostic.get("http_status"),
+                    diagnostic.get("provider_status"),
+                    exc.request_uid,
+                    diagnostic.get("model"),
                 )
             ambiguous = exc.ambiguous
             # A received/finalized 429 is a known quota rejection, not an
@@ -273,6 +276,16 @@ class VoiceIntakeV2Worker:
         if shutil.disk_usage(self.store.root).free < 64 * 1024 * 1024 + 4 * self.settings.max_json_bytes:
             raise StageFailure("spool_capacity_low", sent=False, retryable=True, retry_after_seconds=60)
 
+    def _inference_for(self, session_id: str, stage: str) -> AggregateInference:
+        select = getattr(self.inference, "for_failures", None)
+        if select is None:
+            return self.inference
+        failures = self.store.consecutive_unavailable(session_id, stage)
+        selected: AggregateInference = select(failures)
+        LOGGER.info("voice_v2_provider_selected session_id=%s stage=%s model=%s consecutive_5xx=%s",
+                    session_id, stage, getattr(getattr(selected, "settings", None), "model", None), failures)
+        return selected
+
     async def _process(self, session: ClaimedSession) -> None:
         directory = self.store.session_directory(session.session_id)
         if session.github_verified:
@@ -311,7 +324,7 @@ class VoiceIntakeV2Worker:
                         raise MediaError("audio_duration_mismatch")
                     paths.append(path)
                 await self.media.normalize(tuple(paths), normalized)
-                receipt = await self.inference.transcribe(
+                receipt = await self._inference_for(session.session_id, "transcript").transcribe(
                     audio_path=normalized, recorded_audio_ms=session.complete["recorded_audio_ms"],
                     terminology=session.terminology, checkpoint=checkpoint,
                 )
@@ -321,12 +334,14 @@ class VoiceIntakeV2Worker:
                 session.session_id, self.owner, receipt.value, receipt.request_uid, receipt.limiter
             )
             transcript = receipt.value
+            LOGGER.info("voice_v2_stage_completed session_id=%s stage=transcript request_uid=%s",
+                        session.session_id, receipt.request_uid)
         if summary is None:
             checkpoint = self._checkpoint(session, "summary")
             receipt = await self._restore(checkpoint)
             if receipt is None:
                 self._require_capacity()
-                receipt = await self.inference.summarize(
+                receipt = await self._inference_for(session.session_id, "summary").summarize(
                     transcript=transcript, terminology=session.terminology, checkpoint=checkpoint,
                 )
                 checkpoint.save(receipt)
@@ -335,6 +350,8 @@ class VoiceIntakeV2Worker:
                 session.session_id, self.owner, receipt.value, receipt.request_uid, receipt.limiter
             )
             summary = receipt.value
+            LOGGER.info("voice_v2_stage_completed session_id=%s stage=summary request_uid=%s",
+                        session.session_id, receipt.request_uid)
         projection = self.store.publication_projection(session.session_id, self.owner)
         self.store.set_state(session.session_id, self.owner, "publishing")
         published = await self.publisher.publish_and_verify(projection)
@@ -348,3 +365,5 @@ class VoiceIntakeV2Worker:
         )
         self.store.purge_audio(session.session_id)
         self.store.finish_purge(session.session_id, self.owner)
+        LOGGER.info("voice_v2_published_verified session_id=%s commit_sha=%s audio_purged=True",
+                    session.session_id, published.github_commit_sha)

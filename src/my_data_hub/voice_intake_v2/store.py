@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -386,6 +387,7 @@ class VoiceIntakeV2Store:
             ).fetchone()
             complete = json.loads(row["complete_json"]) if row["complete_json"] else None
             inference_completed = int(row["transcript_json"] is not None) + int(row["summary_json"] is not None)
+            retry_pending = bool(row["retryable"]) and not row["reconciliation_required"]
             return StatusResponse(
                 session_id=session_id,
                 state=row["state"],
@@ -404,6 +406,16 @@ class VoiceIntakeV2Store:
                 github_url=row["github_url"],
                 github_commit_sha=row["github_commit_sha"],
                 retryable=bool(row["retryable"]),
+                retry_after_seconds=(
+                    max(0, math.ceil(row["retry_at"] - self._clock()))
+                    if retry_pending and row["retry_at"] is not None else None
+                ),
+                status_message=(
+                    "Gemini временно недоступен. Аудио сохранено, сервер повторит автоматически."
+                    if retry_pending and row["error_code"] in {
+                        "provider_unavailable", "provider_rejected_request"
+                    } else None
+                ),
                 retry_at=(
                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["retry_at"]))
                     if row["retry_at"] is not None else None
@@ -578,6 +590,19 @@ class VoiceIntakeV2Store:
                    AND code='response_schema_invalid'""", (session_id, stage),
             ).fetchone()
             return int(row[0])
+
+    def consecutive_unavailable(self, session_id: str, stage: str) -> int:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT http_status FROM inference_failures WHERE session_id=? AND stage=?
+                   ORDER BY created_at DESC,request_uid DESC""", (session_id, stage),
+            )
+            count = 0
+            for row in rows:
+                if row[0] is None or not 500 <= row[0] < 600:
+                    break
+                count += 1
+            return count
 
     def persist_transcript(
         self, session_id: str, owner: str, value: dict[str, Any], request_uid: str,
