@@ -77,6 +77,7 @@ def test_spool_initialization_failure_keeps_existing_v1_application_available(
 def test_runtime_enables_worker_completion_and_recovery_logging(monkeypatch):
     import uvicorn
     from uvicorn.config import LOGGING_CONFIG
+
     from my_data_hub.voice_intake import runtime as server
     app = object()
     monkeypatch.setattr(server, 'create_voice_control_app', lambda settings: app)
