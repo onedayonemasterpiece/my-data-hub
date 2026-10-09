@@ -11,7 +11,11 @@
     for (const card of cards) {
       const filterMatch = filters.every((filter) => {
         const value = filter.value;
-        return !value || card.dataset[filter.dataset.showcaseFilter] === value;
+        if (!value) return true;
+        if (filter.dataset.showcaseFilter === 'audience') {
+          return (card.dataset.audiences || card.dataset.audience || '').split(' ').includes(value);
+        }
+        return card.dataset[filter.dataset.showcaseFilter] === value;
       });
       const queryMatch = !query || normalize(card.dataset.search).includes(query);
       const show = filterMatch && queryMatch;

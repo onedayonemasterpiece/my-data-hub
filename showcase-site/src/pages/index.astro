@@ -9,8 +9,10 @@ import filtersUrl from '../scripts/showcase-filters.js?url&no-inline';
 import interactionsUrl from '../scripts/showcase-share.js?url&no-inline';
 const { view, items } = loadShowcase();
 const wanted = view.filters || ['audience', 'category', 'maturity'];
-const options = (key) => [...new Map(items.map((item) => [item[key].id,
-  key === 'maturity' ? maturityLabel(item[key]).label : item[key].label])).entries()];
+const options = (key) => [...new Map(items.flatMap((item) => {
+  const values = key === 'audience' ? (item.audiences?.length ? item.audiences : [item.audience]) : [item[key]];
+  return values.map((value) => [value.id, key === 'maturity' ? maturityLabel(value).label : value.label]);
+})).entries()];
 const show = (key) => wanted.includes(key) && options(key).length > 1;
 const capabilityTypes = new Set(items.map((item) => item.capability_type).filter(Boolean));
 const showTypes = wanted.includes('capabilityType') && capabilityTypes.size > 1;
