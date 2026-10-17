@@ -185,3 +185,22 @@ def test_command_error_diagnostics_do_not_echo_stderr(monkeypatch):
         mod['command'](['systemctl','--user','show','unit'])
     assert 'exit=1; category=user_bus_connection_failed' in str(error.value)
     assert 'secret-value' not in str(error.value)
+
+
+def test_inspect_digest_roundtrip_and_mismatch(tmp_path):
+    import hashlib
+    host=Host(tmp_path/'unit.conf')
+    inspected=mod['inspect_current'](host)
+    digest=hashlib.sha256(inspected['exec_start'].encode('utf-8')).hexdigest()
+    args=kwargs(tmp_path,host); args.pop('expected_start')
+    result=rollout(**args,expected_start_sha256=digest)
+    assert result['state']=='dry_run' and not list(tmp_path.iterdir())
+    with pytest.raises(Error,match='ExecStart changed'):
+        rollout(**args,expected_start_sha256='0'*64,apply=True)
+    assert not list(tmp_path.iterdir())
+
+
+def test_exec_start_guards_are_exclusive(tmp_path):
+    host=Host(tmp_path/'unit.conf')
+    with pytest.raises(Error,match='exactly one'):
+        rollout(**kwargs(tmp_path,host),expected_start_sha256='0'*64)

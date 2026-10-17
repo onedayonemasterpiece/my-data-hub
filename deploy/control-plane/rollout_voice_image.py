@@ -8,6 +8,7 @@ an exact-SHA image and obtaining deployment approval. No database/secret reads.
 from __future__ import annotations
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -140,11 +141,18 @@ def inspect_current(run=command):
             'containers':snapshot(run,prefix)}
 
 
-def rollout(*, expected_start,expected_image,target_image,dropin,override,apply=False,run=command,timeout=120,voice_config_file=None):
+def rollout(*, expected_start=None,expected_start_sha256=None,expected_image,target_image,dropin,override,apply=False,run=command,timeout=120,voice_config_file=None):
     if not IMAGE.fullmatch(target_image) or not re.fullmatch(r'sha256:[a-f0-9]{64}',expected_image):
         raise RolloutError('exact old image ID and prepared SHA image tag required')
     start=systemd_argv(run(['systemctl','--user','show',SERVICE,'--property=ExecStart','--value']))
-    if start!=shlex.split(expected_start): raise RolloutError('ExecStart changed')
+    if (expected_start is None)==(expected_start_sha256 is None):
+        raise RolloutError('exactly one ExecStart guard required')
+    if expected_start_sha256 is not None:
+        if not re.fullmatch(r'[a-f0-9]{64}',expected_start_sha256):
+            raise RolloutError('ExecStart SHA256 must be 64 lowercase hexadecimal characters')
+        if hashlib.sha256(unit_line(start).encode('utf-8')).hexdigest()!=expected_start_sha256:
+            raise RolloutError('ExecStart changed')
+    elif start!=shlex.split(expected_start): raise RolloutError('ExecStart changed')
     prefix,suffix=compose_parts(start)
     reload_raw=run(['systemctl','--user','show',SERVICE,'--property=ExecReload','--value'])
     reload_argv=systemd_argv(reload_raw) if reload_raw else None
@@ -241,7 +249,9 @@ def rollout(*, expected_start,expected_image,target_image,dropin,override,apply=
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inspect',action='store_true',help='Read only current allowlisted unit argv and Docker identities; no configuration contents')
-    parser.add_argument('--expected-exec-start')
+    guard=parser.add_mutually_exclusive_group()
+    guard.add_argument('--expected-exec-start')
+    guard.add_argument('--expected-exec-start-sha256',help='SHA256 of exact UTF-8 exec_start string returned by --inspect, without newline')
     parser.add_argument('--expected-image-id')
     parser.add_argument('--target-image')
     parser.add_argument('--override',type=Path)
@@ -251,19 +261,19 @@ def main():
     args=parser.parse_args()
     try:
         if args.inspect:
-            if args.apply or args.voice_config_file or any((args.expected_exec_start,args.expected_image_id,args.target_image,args.override)):
+            if args.apply or args.voice_config_file or any((args.expected_exec_start,args.expected_exec_start_sha256,args.expected_image_id,args.target_image,args.override)):
                 raise RolloutError('--inspect cannot be combined with deployment arguments')
             print(json.dumps(inspect_current(),sort_keys=True)); return 0
-        if not all((args.expected_exec_start,args.expected_image_id,args.target_image,args.override)):
+        if not all((args.expected_exec_start or args.expected_exec_start_sha256,args.expected_image_id,args.target_image,args.override)):
             raise RolloutError('deployment requires expected ExecStart, image ID, target image and override')
         if args.apply:
             lock=args.dropin.parent/'voice-image-rollout.lock'
             lock.parent.mkdir(parents=True,exist_ok=True)
             with lock.open('a') as f:
                 fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                value=rollout(expected_start=args.expected_exec_start,expected_image=args.expected_image_id,target_image=args.target_image,dropin=args.dropin,override=args.override,apply=True,voice_config_file=args.voice_config_file)
+                value=rollout(expected_start=args.expected_exec_start,expected_start_sha256=args.expected_exec_start_sha256,expected_image=args.expected_image_id,target_image=args.target_image,dropin=args.dropin,override=args.override,apply=True,voice_config_file=args.voice_config_file)
         else:
-            value=rollout(expected_start=args.expected_exec_start,expected_image=args.expected_image_id,target_image=args.target_image,dropin=args.dropin,override=args.override,voice_config_file=args.voice_config_file)
+            value=rollout(expected_start=args.expected_exec_start,expected_start_sha256=args.expected_exec_start_sha256,expected_image=args.expected_image_id,target_image=args.target_image,dropin=args.dropin,override=args.override,voice_config_file=args.voice_config_file)
         print(json.dumps(value,sort_keys=True)); return 0
     except (RolloutError,OSError,ValueError,subprocess.TimeoutExpired) as exc:
         detail=str(exc) if isinstance(exc,RolloutError) else type(exc).__name__
