@@ -216,8 +216,9 @@ def rollout(
     target = json.loads(run(["/usr/bin/docker", "image", "inspect", "--format", "{{json .Id}}", target_image]))
     if not re.fullmatch(r"sha256:[a-f0-9]{64}", target):
         raise RolloutError("prepared image unavailable")
-    if target == expected_image:
-        raise RolloutError("target image already active")
+    same_image = target == expected_image
+    if same_image and voice_config_file is None:
+        raise RolloutError("target image already active; explicit approved config file required")
     if not override.is_absolute() or not dropin.is_absolute():
         raise RolloutError("absolute output paths required")
     newprefix = [*prefix, "-f", str(override)]
@@ -236,6 +237,22 @@ def rollout(
             raise RolloutError("approved config permissions/owner/size invalid")
         service_config["volumes"] = [str(voice_config_file) + ":/run/secrets/voice-analysis.json:ro"]
         service_config["environment"] = {"MY_DATA_HUB_VOICE_ANALYSIS_CONFIG_FILE": "/run/secrets/voice-analysis.json"}
+        if same_image:
+            container_id = before["control-plane"]["id"]
+            # Inspect only booleans for this exact mount and nonsecret config-file
+            # variable. Never inspect/return the token or the environment array.
+            mount_template = (
+                '{{range .Mounts}}{{if and (eq .Destination "/run/secrets/voice-analysis.json") '
+                "(eq .Source " + json.dumps(str(voice_config_file)) + ") (not .RW)}}true{{end}}{{end}}"
+            )
+            env_template = (
+                "{{range .Config.Env}}{{if eq . "
+                '"MY_DATA_HUB_VOICE_ANALYSIS_CONFIG_FILE=/run/secrets/voice-analysis.json"}}true{{end}}{{end}}'
+            )
+            mount_matches = run(["/usr/bin/docker", "inspect", "--format", mount_template, container_id]) == "true"
+            env_matches = run(["/usr/bin/docker", "inspect", "--format", env_template, container_id]) == "true"
+            if mount_matches and env_matches:
+                raise RolloutError("target image and approved config already active; no-op rollout denied")
     overlay = json.dumps({"services": {"control-plane": service_config}}, indent=2) + "\n"
     unit = "[Service]\nExecStart=\nExecStart=" + unit_line(newprefix + suffix) + "\n"
     if reload_argv:
@@ -304,6 +321,11 @@ def rollout(
             if time.monotonic() >= deadline:
                 raise RolloutError("new control-plane health not confirmed")
             time.sleep(1)
+        if same_image and (
+            run(["/usr/bin/docker", "inspect", "--format", mount_template, cid]) != "true"
+            or run(["/usr/bin/docker", "inspect", "--format", env_template, cid]) != "true"
+        ):
+            raise RolloutError("approved config mount/environment not confirmed")
         after = snapshot(run, newprefix)
         if {k: v for k, v in after.items() if k != "control-plane"} != {
             k: v for k, v in before.items() if k != "control-plane"

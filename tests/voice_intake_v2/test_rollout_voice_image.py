@@ -323,3 +323,83 @@ def test_default_dropin_follows_verified_recovery_dropin():
     source = (Path(__file__).resolve().parents[2] / "deploy/control-plane/rollout_voice_image.py").read_text()
     assert 'f"{SERVICE}.d/z-voice-analysis-image.conf"' in source
     assert "z-voice-analysis-image.conf" > "voice-recovery.conf"
+
+
+class SameImageHost(Host):
+    def __init__(self, dropin, configured=False):
+        super().__init__(dropin)
+        self.configured = configured
+
+    def __call__(self, args):
+        if args[:3] == ["/usr/bin/docker", "image", "inspect"]:
+            self.calls.append(args)
+            return json.dumps(OLD)
+        if args[:2] == ["/usr/bin/docker", "inspect"] and "{{range" in args[3]:
+            self.calls.append(args)
+            assert "{{json .Config.Env}}" not in args[3]
+            return "true" if self.configured else ""
+        if "up" in args:
+            self.calls.append(args)
+            assert args[-4:] == ["up", "-d", "--no-deps", "control-plane"]
+            self.configured = str(self.dropin.parent / "overlay.json") in args
+            return ""
+        result = super().__call__(args)
+        if args[:2] == ["/usr/bin/docker", "inspect"]:
+            value = json.loads(result)
+            value["Revision"] = "a" * 40
+            return json.dumps(value)
+        return result
+
+
+def test_same_image_requires_explicit_config(tmp_path):
+    host = SameImageHost(tmp_path / "unit.conf")
+    with pytest.raises(Error, match="explicit approved config"):
+        rollout(**kwargs(tmp_path, host), apply=True)
+    assert not list(tmp_path.iterdir())
+
+
+def test_same_image_config_activation_without_rebuild(tmp_path):
+    host = SameImageHost(tmp_path / "unit.conf")
+    config = tmp_path / "approved.json"
+    config.write_text('{"token":"never-output"}')
+    config.chmod(0o600)
+    result = rollout(**kwargs(tmp_path, host), voice_config_file=config, apply=True)
+    assert result["state"] == "healthy" and result["image_id"] == OLD
+    assert "never-output" not in json.dumps(result)
+    assert not any("build" in call or "restart" in call for call in host.calls)
+    assert any("up" in call for call in host.calls)
+
+
+def test_same_image_matching_config_is_noop_before_writes(tmp_path):
+    host = SameImageHost(tmp_path / "unit.conf", configured=True)
+    config = tmp_path / "approved.json"
+    config.write_text("{}")
+    config.chmod(0o600)
+    with pytest.raises(Error, match="no-op rollout denied"):
+        rollout(**kwargs(tmp_path, host), voice_config_file=config, apply=True)
+    assert not host.dropin.exists()
+    assert not (tmp_path / "overlay.json").exists()
+    assert not any("up" in call for call in host.calls)
+
+
+def test_same_image_failed_activation_rolls_back_configuration(tmp_path):
+    class UnhealthyConfigHost(SameImageHost):
+        def __call__(self, args):
+            result = super().__call__(args)
+            if args[:2] == ["/usr/bin/docker", "inspect"] and "{{range" not in args[3]:
+                value = json.loads(result)
+                if value["Service"] == "control-plane" and self.configured:
+                    value["State"]["Health"]["Status"] = "unhealthy"
+                return json.dumps(value)
+            return result
+
+    host = UnhealthyConfigHost(tmp_path / "unit.conf")
+    config = tmp_path / "approved.json"
+    config.write_text("{}")
+    config.chmod(0o600)
+    with pytest.raises(Error, match="prior startup and image restored"):
+        rollout(**kwargs(tmp_path, host), voice_config_file=config, apply=True)
+    assert not host.configured and host.image == OLD
+    rollback = json.loads((tmp_path / "overlay.json.rollback.json").read_text())
+    assert rollback == {"services": {"control-plane": {"image": OLD}}}
+    assert "overlay.json.rollback.json" in host.dropin.read_text()
