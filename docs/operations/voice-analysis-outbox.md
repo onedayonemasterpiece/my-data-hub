@@ -152,3 +152,32 @@ Broad INSTALL refuses while either legacy `60-voice-image.conf` or current
 `z-voice-analysis-image.conf` exists; explicitly reconcile the preserved compose
 chain before a later broad release. PREPARE remains allowed. Credentials and
 private integration configuration require their separate approved setup.
+
+### Проверка установленного Python-пакета при выкладке
+
+Команды ниже выполняются из корня `my-data-hub`. `EXPECTED_COMMIT` — полный SHA коммита, из которого подготовлен релиз; `VOICE_IMAGE` — подготовленный локальный образ; `VOICE_CONTAINER_ID` — полный ID запущенного контейнера обработчика голоса.
+
+Перед применением релиза:
+
+```bash
+python deploy/control-plane/verify_voice_package.py \
+  --image "$VOICE_IMAGE" \
+  --expected-ref "$EXPECTED_COMMIT"
+```
+
+Verifier разрешает тег образа в immutable image ID и сравнивает SHA256 всех Python-файлов установленного `my_data_hub` с `git archive` указанного коммита. Проверка образа использует временный контейнер с `--rm`, без сети и mounts, с read-only filesystem. Продолжать выкладку следует после `status: matched` и exit code `0`; результат содержит точный image ID, `package_root`, количества файлов и хеши манифестов. Пропущенные, добавленные и изменённые файлы приводят к ненулевому exit code.
+
+После применения релиза:
+
+```bash
+python deploy/control-plane/verify_voice_package.py \
+  --container "$VOICE_CONTAINER_ID" \
+  --expected-ref "$EXPECTED_COMMIT"
+
+python deploy/control-plane/inspect_voice_readiness.py \
+  --container "$VOICE_CONTAINER_ID"
+```
+
+Для установленного пакета также требуется `status: matched`. `inspect_voice_readiness.py` выводит только пять boolean-полей: `enabled`, `delivery_ready`, `owner_bound`, `private_config_file_set`, `source_repository_set`. Перед приёмкой включённой аналитики все пять должны быть `true`; значения секретов и содержимое БД в вывод не попадают.
+
+Источником идентификации исполняемого кода служит `package_root`, полученный через `find_spec("my_data_hub")`. Копия `/app/src` может отличаться от установленного пакета, поэтому её содержимое не подтверждает версию запущенного обработчика. Эти проверки подтверждают состав Python-пакета и готовность конфигурации; сквозная проверка обработки голосовой записи и доставки результата остаётся частью приёмки.
