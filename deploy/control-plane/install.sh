@@ -39,7 +39,8 @@ fi
 # A narrow voice rollout owns an exact preserved compose chain. Do not let a
 # broad installer silently deploy a new base unit beneath its old drop-in.
 voice_image_dropin="$HOME/.config/systemd/user/my-data-hub-control-plane.service.d/60-voice-image.conf"
-if [[ "$action" != "PREPARE_CONTROL_PLANE" && -e "$voice_image_dropin" ]]; then
+voice_analysis_dropin="$HOME/.config/systemd/user/my-data-hub-control-plane.service.d/z-voice-analysis-image.conf"
+if [[ "$action" != "PREPARE_CONTROL_PLANE" && ( -e "$voice_image_dropin" || -e "$voice_analysis_dropin" ) ]]; then
   echo "managed voice image override exists; explicitly reconcile its compose chain before broad INSTALL" >&2
   exit 78
 fi
