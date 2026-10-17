@@ -262,6 +262,7 @@ async def test_max_tokens_truncation_is_retryable_and_diagnostics_never_contain_
     assert len(limiter.finalized) == 1
     assert limiter.finalized[0][1]["error_code"] == "response_schema_invalid"
     assert failure.diagnostics == {
+        "model": auth_settings.model,
         "schema": "voice_intake_transcript",
         "schema_version": "1.0.0",
         "json_path": "$",
@@ -370,3 +371,23 @@ def test_missing_field_diagnostics_are_bounded_to_thirty_two():
     assert diagnostics["missing_fields"] == [f"required_{index:02d}" for index in range(32)]
     assert len(diagnostics["missing_fields"]) == 32
     assert diagnostics["extra_fields"] == []
+
+
+@pytest.mark.parametrize('retry_after,expected', [('75', 75), ('1.2', 2), ('NaN', None), ('Infinity', None)])
+def test_http_failure_diagnostics_are_safe_and_delay_is_bounded(retry_after, expected):
+    failure = AggregateGeminiInference._http_failure(503, retry_after, {
+        'error': {'status': 'UNAVAILABLE', 'message': 'PRIVATE dictated text and key'},
+    })
+    assert failure.code == 'provider_unavailable'
+    assert failure.retryable and not failure.ambiguous
+    assert failure.retry_after_seconds == expected
+    assert failure.diagnostics == {'http_status': 503, 'provider_status': 'UNAVAILABLE'}
+    assert 'PRIVATE' not in json.dumps(failure.diagnostics)
+
+
+def test_http_failure_accepts_http_date_without_exposing_unknown_status():
+    failure = AggregateGeminiInference._http_failure(503, 'Fri, 01 Jan 2100 00:00:00 GMT', {
+        'error': {'status': ['PRIVATE']},
+    })
+    assert failure.retry_after_seconds == 86400
+    assert failure.diagnostics['provider_status'] is None

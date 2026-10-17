@@ -76,7 +76,7 @@ async def test_long_provider_outage_recovers_after_restart_without_phone(
     assert "PRIVATE" not in caplog.text
     with store._connect() as connection:
         failures = connection.execute("SELECT code,http_status FROM inference_failures").fetchall()
-        assert [tuple(r) for r in failures] == [("provider_rejected_request", 503)] * 6
+        assert [tuple(r) for r in failures] == [("provider_unavailable", 503)] * 6
     if stage == "summary":
         assert sum(len(c["json_body"]["contents"][0]["parts"]) == 2 for c in requester.calls) == 1
 
@@ -200,3 +200,30 @@ async def test_crash_after_definite_response_restores_failure_without_paid_repla
     now[0] += 76
     assert await worker.process_once()
     assert store.status(SESSION_ID).state == "published_verified"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['transcript', 'summary'])
+async def test_allowed_model_fallback_survives_restart_and_reuses_completed_stage(
+    tmp_path, create_request, complete_request, terminology, auth_settings, stage,
+):
+    from dataclasses import replace
+    primary = auth_settings.model
+    fallback = 'gemini-3.5-flash-lite'
+    auth_settings = replace(auth_settings, allowed_models=(primary, fallback))
+    responses = ([200] if stage == 'summary' else []) + [503] * 3 + [200] * (2 if stage == 'transcript' else 1)
+    store, now, requester, limiter, worker, publisher = harness(
+        tmp_path, create_request, complete_request, terminology, auth_settings, responses,
+    )
+    for _ in range(3):
+        assert await worker.process_once()
+        now[0] += 901
+        worker.store = VoiceIntakeV2Store(store.root, clock=lambda: now[0])
+    assert await worker.process_once()
+    assert store.status(SESSION_ID).state == 'published_verified'
+    assert limiter.reserves[-1 if stage == 'summary' else -2]['model'] == fallback
+    projection = publisher.projections[0]
+    assert projection.summary_limiter['model'] == (fallback if stage == 'summary' else primary)
+    assert projection.transcription_limiter['model'] == (fallback if stage == 'transcript' else primary)
+    if stage == 'summary':
+        assert sum(len(c['json_body']['contents'][0]['parts']) == 2 for c in requester.calls) == 1
