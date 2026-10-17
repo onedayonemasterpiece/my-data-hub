@@ -1769,6 +1769,7 @@ def validate_deployment(report: Report) -> None:
         "deploy/showcase-runtime/nginx.conf",
         "deploy/showcase-runtime/runtime.env.example",
         "deploy/control-plane/collect_deployment_evidence.py",
+        "deploy/control-plane/rollout_voice_image.py",
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",

@@ -165,6 +165,17 @@ class VoiceIntakeV2Store:
                 );
                 CREATE INDEX IF NOT EXISTS sessions_work_idx
                   ON sessions(state, lease_until, retry_at, updated_at);
+                CREATE TABLE IF NOT EXISTS analysis_outbox (
+                    intent_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    retry_at REAL NOT NULL DEFAULT 0,
+                    lease_until REAL,
+                    last_error TEXT,
+                    receipt_json TEXT,
+                    created_at REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS inference_failures (
                     session_id TEXT NOT NULL REFERENCES sessions(session_id),
                     stage TEXT NOT NULL,
@@ -622,12 +633,114 @@ class VoiceIntakeV2Store:
             model=row["model"],
         )
 
-    def persist_github_verified(self, session_id: str, owner: str, *, url: str, commit_sha: str) -> None:
-        self._owned_update(
-            session_id, owner,
-            "github_url=?,github_commit_sha=?,github_verified=1,state='verifying'",
-            (url, commit_sha),
-        )
+    def persist_github_verified(
+        self, session_id: str, owner: str, *, url: str, commit_sha: str,
+        analysis_intent: dict[str, Any] | None = None,
+    ) -> None:
+        # Operational outbox only, not a second canonical business store. The
+        # verified source receipt and event become durable in the same commit.
+        now = self._clock()
+        with self._transaction() as connection:
+            changed = connection.execute(
+                """UPDATE sessions SET github_url=?,github_commit_sha=?,github_verified=1,
+                   state='verifying',updated_at=? WHERE session_id=? AND lease_owner=? AND lease_until>?""",
+                (url, commit_sha, now, session_id, owner, now),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("worker_lease_lost")
+            if analysis_intent is not None:
+                connection.execute(
+                    """INSERT OR IGNORE INTO analysis_outbox(intent_id,payload_json,created_at)
+                       VALUES(?,?,?)""",
+                    (analysis_intent["intent_id"], json.dumps(analysis_intent, ensure_ascii=False), now),
+                )
+
+    def claim_analysis_intent(self) -> dict[str, Any] | None:
+        now = self._clock()
+        with self._transaction() as connection:
+            row = connection.execute(
+                """SELECT * FROM analysis_outbox WHERE state='pending' AND retry_at<=?
+                   AND (lease_until IS NULL OR lease_until<=?) ORDER BY created_at LIMIT 1""", (now, now),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE analysis_outbox SET lease_until=?,attempts=attempts+1 WHERE intent_id=?",
+                (now + 60, row["intent_id"]),
+            )
+            return {**dict(row), "attempts": row["attempts"] + 1}
+
+    def finish_analysis_delivery(
+        self, intent_id: str, *, receipt: dict[str, Any] | None = None,
+        error: str | None = None, terminal: bool = False, attempt: int,
+    ) -> None:
+        with self._transaction() as connection:
+            if receipt is not None:
+                previous = connection.execute(
+                    "SELECT receipt_json FROM analysis_outbox WHERE intent_id=?", (intent_id,)
+                ).fetchone()
+                if previous is not None and previous["receipt_json"]:
+                    receipt = {**json.loads(previous["receipt_json"]), **receipt}
+            connection.execute(
+                """UPDATE analysis_outbox SET state=?,lease_until=NULL,retry_at=?,
+                   last_error=?,receipt_json=COALESCE(?,receipt_json) WHERE intent_id=? AND attempts=?""",
+                ("delivered" if receipt is not None else "blocked" if terminal else "pending",
+                 self._clock() + 60, error, json.dumps(receipt) if receipt is not None else None, intent_id, attempt),
+            )
+
+    def redrive_analysis_intent(self, intent_id: str, *, owner_id: str, repository: str) -> bool:
+        """Explicit operator recovery after correcting transport configuration.
+
+        Immutable source conflicts and changed owner bindings are not retryable.
+        """
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM analysis_outbox WHERE intent_id=?", (intent_id,)).fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row["payload_json"])
+            if payload["owner_id"] != owner_id or payload["source"]["repository"] != repository:
+                raise StoreError("analysis_binding_mismatch")
+            if row["state"] != "blocked" or row["last_error"] not in {"http_401", "http_403", "http_404"}:
+                return False
+            connection.execute(
+                "UPDATE analysis_outbox SET state='pending',retry_at=0,lease_until=NULL WHERE intent_id=?",
+                (intent_id,),
+            )
+            return True
+
+    def claim_analysis_projection(self) -> dict[str, Any] | None:
+        now = self._clock()
+        with self._transaction() as connection:
+            row = connection.execute(
+                """SELECT * FROM analysis_outbox WHERE state='delivered' AND retry_at<=?
+                   AND (lease_until IS NULL OR lease_until<=?) ORDER BY retry_at LIMIT 1""", (now, now),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE analysis_outbox SET lease_until=?,attempts=attempts+1 WHERE intent_id=?",
+                (now + 120, row["intent_id"])
+            )
+            return {**dict(row), "attempts": row["attempts"] + 1}
+
+    def finish_analysis_projection(
+        self, intent_id: str, *, receipt: dict[str, Any], error: str | None = None,
+        attempt: int, reconciliation_required: bool = False,
+    ) -> None:
+        with self._transaction() as connection:
+            connection.execute(
+                """UPDATE analysis_outbox SET state=?,lease_until=NULL,retry_at=?,receipt_json=?,last_error=?
+                   WHERE intent_id=? AND state='delivered' AND attempts=?""",
+                ("projection_reconciliation_required" if reconciliation_required else "delivered",
+                 self._clock() + 60, json.dumps(receipt), error, intent_id, attempt),
+            )
+
+    def analysis_status(self, intent_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT intent_id,state,attempts,last_error FROM analysis_outbox WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def finish_purge(self, session_id: str, owner: str) -> None:
         self._owned_update(

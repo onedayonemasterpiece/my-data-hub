@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
 
+from .analysis import AnalysisSettings
 from .api import attach_voice_intake_v2_routes
 from .inference import AggregateGeminiInference
 from .media import BoundedMediaTools
@@ -52,6 +53,7 @@ def attach_configured_voice_intake_v2(
     inference = AggregateGeminiInference(auth)
     worker = VoiceIntakeV2Worker(
         store, config, media=media, inference=inference, publisher=runtime_publisher,
+        analysis_settings=AnalysisSettings.from_env(auth.github_repository),
     )
     return attach_voice_intake_v2_routes(
         app, auth_settings=auth, settings=config, store=store, media=media,
