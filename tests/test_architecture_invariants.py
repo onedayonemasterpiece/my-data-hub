@@ -181,6 +181,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
     } == {
         "deploy/control-plane/Dockerfile",
         "deploy/control-plane/collect_deployment_evidence.py",
+        "deploy/control-plane/rollout_voice_image.py",
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",

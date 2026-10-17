@@ -287,6 +287,96 @@ class V2IdeaHubPublisher(IdeaHubPublisher):
         ):
             raise GitHubPublicationConflict("github_main_readback_missing_session")
 
+    @staticmethod
+    def _analysis_transcript(content: str) -> str:
+        heading = "\n## Полная расшифровка\n\n"
+        ending = "\n\n## Техническая фиксация\n"
+        if heading not in content:
+            raise GitHubPublicationConflict("analysis_source_structure_changed")
+        remaining = content.split(heading, 1)[1]
+        if ending not in remaining:
+            raise GitHubPublicationConflict("analysis_source_structure_changed")
+        # Ignore later machine projection headings when finding the original
+        # technical footer. Raw text and its hash remain immutable evidence.
+        remaining = remaining.split("<!-- voice-analysis:", 1)[0]
+        return remaining.rsplit(ending, 1)[0].strip()
+
+    async def project_analysis(
+        self, *, intent_id: str, source: dict[str, Any], revision: str, markdown: str,
+        expected_previous_revision: str | None = None,
+    ) -> str:
+        """CAS-write only an owned analysis block, preserving the source revision."""
+        import re
+        if (source["repository"] != self._settings.github_repository
+                or not re.fullmatch(r"voice:[0-9a-f]{64}", intent_id)
+                or not re.fullmatch(r"[0-9a-f]{64}", revision)
+                or len(markdown.encode()) > 256 * 1024
+                or hashlib.sha256(markdown.encode()).hexdigest() != revision):
+            raise ValueError("analysis_projection_invalid")
+        path = source["path"]
+        original, _ = await self._content(path, source["commit_sha"])
+        transcript = self._analysis_transcript(original)
+        if hashlib.sha256(transcript.encode()).hexdigest() != source["transcript_sha256"]:
+            raise GitHubPublicationConflict("analysis_source_hash_mismatch")
+        start = f"<!-- voice-analysis:{intent_id}:start -->"
+        end = f"<!-- voice-analysis:{intent_id}:end -->"
+        if "<!-- voice-analysis:" in markdown:
+            raise ValueError("analysis_projection_marker_invalid")
+        block = (f"{start}\n<!-- revision:{revision} -->\n"
+                 f"<!-- original-source:{source['commit_sha']} -->\n{markdown}\n{end}")
+        head, tree_sha = await self._head()
+        current, _ = await self._content(path, head)
+        current_transcript = self._analysis_transcript(current)
+        if hashlib.sha256(current_transcript.encode()).hexdigest() != source["transcript_sha256"]:
+            raise GitHubPublicationConflict("analysis_source_changed")
+        if current.count(start) != current.count(end) or current.count(start) > 1:
+            raise GitHubPublicationConflict("analysis_projection_markers_conflict")
+        if start in current:
+            before, remaining = current.split(start)
+            old, after = remaining.split(end)
+            if start + old + end == block:
+                return head
+            # Preserve user edits to an owned section instead of silently
+            # replacing them with the next machine revision.
+            lines = old[1:-1].split("\n", 2)
+            old_revision = lines[0].removeprefix("<!-- revision:").removesuffix(" -->")
+            old_markdown = lines[2] if len(lines) == 3 else ""
+            if old_revision != expected_previous_revision:
+                raise GitHubPublicationConflict("analysis_projection_revision_conflict")
+            # Preserve the exact body including any final newline.
+            if hashlib.sha256(old_markdown.encode()).hexdigest() != old_revision:
+                raise GitHubPublicationConflict("analysis_projection_manually_changed")
+            updated = before + block + after
+        else:
+            if expected_previous_revision is not None:
+                raise GitHubPublicationConflict("analysis_projection_block_missing")
+            updated = current.rstrip() + "\n\n" + block + "\n"
+        blob = await self._blob(updated)
+        tree = await self._json("POST", "/git/trees", {"base_tree": tree_sha,
+            "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob}]})
+        commit = await self._json("POST", "/git/commits", {
+            "message": "voice: project verified analysis section", "tree": tree["sha"], "parents": [head]})
+        sha = str(commit["sha"])
+        try:
+            response = await self._request("PATCH",
+                f"/git/refs/heads/{quote(self._settings.github_branch, safe='/-._~')}",
+                {"sha": sha, "force": False})
+            self._require_success(response, "analysis_projection_ref_update_failed")
+        except VoiceIntakeError:
+            # Never retry a possibly-applied write inside this call. Readback
+            # below can reconcile it; the next cycle also compares the block.
+            current_head, _ = await self._head()
+            actual, _ = await self._content(path, current_head)
+            if block not in actual:
+                raise
+            return current_head
+        exact, _ = await self._content(path, sha)
+        current_head, _ = await self._head()
+        actual, _ = await self._content(path, current_head)
+        if exact != updated or block not in actual:
+            raise GitHubPublicationConflict("analysis_projection_readback_failed")
+        return sha
+
     def _receipt(self, rendered: RenderedPublication, commit_sha: str) -> PublicationReceipt:
         return PublicationReceipt(
             github_url=self._branch_url(rendered.source_path),

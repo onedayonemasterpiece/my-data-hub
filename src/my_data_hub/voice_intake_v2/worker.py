@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from my_data_hub.voice_intake.errors import VoiceIntakeError
 
+from .analysis import AnalysisDelivery, AnalysisSettings, build_intent
 from .checkpoint import (
     AccountingPending,
     CheckpointError,
@@ -76,6 +77,7 @@ class VoiceIntakeV2Worker:
         inference: AggregateInference,
         publisher: SessionPublisher,
         owner: str | None = None,
+        analysis_settings: AnalysisSettings | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -83,6 +85,9 @@ class VoiceIntakeV2Worker:
         self.media = media
         self.inference = inference
         self.publisher = publisher
+        self.analysis_settings = analysis_settings
+        self.analysis_delivery = AnalysisDelivery(store, analysis_settings, publisher) if analysis_settings else None
+        self._analysis_task: asyncio.Task[None] | None = None
         self.owner = owner or f"voice-v2-{uuid4()}"
         self._clock = clock
         self._task: asyncio.Task[None] | None = None
@@ -92,9 +97,17 @@ class VoiceIntakeV2Worker:
         if self._task is None or self._task.done():
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="voice-intake-v2-worker")
+            if self.analysis_delivery and self.analysis_delivery.settings.delivery_ready:
+                self.analysis_delivery.stop_event.clear()
+                self._analysis_task = asyncio.create_task(self.analysis_delivery.run(), name="voice-analysis-delivery")
 
     async def stop(self) -> None:
         self._stop.set()
+        if self.analysis_delivery:
+            self.analysis_delivery.stop_event.set()
+        if self._analysis_task:
+            await self._analysis_task
+            self._analysis_task = None
         if self._task is not None:
             await self._task
             self._task = None
@@ -345,6 +358,8 @@ class VoiceIntakeV2Worker:
         self.store.persist_github_verified(
             session.session_id, self.owner,
             url=published.github_url, commit_sha=published.github_commit_sha,
+            analysis_intent=build_intent(projection, published.github_commit_sha, self.analysis_settings)
+            if self.analysis_settings else None,
         )
         self.store.purge_audio(session.session_id)
         self.store.finish_purge(session.session_id, self.owner)
