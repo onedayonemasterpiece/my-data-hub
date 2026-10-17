@@ -149,3 +149,39 @@ def test_inspect_cli_needs_no_deployment_args(tmp_path,monkeypatch,capsys):
     result=json.loads(capsys.readouterr().out)
     assert result['exec_start']==START
     assert not list(tmp_path.iterdir())
+
+
+def test_command_sets_current_user_bus_without_inherited_environment(monkeypatch):
+    from types import SimpleNamespace
+    command=mod['command']
+    monkeypatch.delenv('XDG_RUNTIME_DIR',raising=False)
+    monkeypatch.delenv('DBUS_SESSION_BUS_ADDRESS',raising=False)
+    monkeypatch.setattr(mod['os'],'getuid',lambda: 1234)
+    monkeypatch.setattr(Path,'exists',lambda p: str(p)=='/run/user/1234/bus')
+    calls=[]
+    def run(argv,**kwargs):
+        calls.append((argv,kwargs))
+        return SimpleNamespace(returncode=0,stdout='active\n',stderr='')
+    monkeypatch.setattr(mod['subprocess'],'run',run)
+    assert command(['systemctl','--user','is-active','unit'])=='active'
+    env=calls[0][1]['env']
+    assert env['XDG_RUNTIME_DIR']=='/run/user/1234'
+    assert env['DBUS_SESSION_BUS_ADDRESS']=='unix:path=/run/user/1234/bus'
+    assert env['HOME']==str(Path.home())
+
+
+def test_missing_bus_fails_before_subprocess(monkeypatch):
+    monkeypatch.setattr(Path,'exists',lambda p: False)
+    monkeypatch.setattr(mod['subprocess'],'run',lambda *a,**k: pytest.fail('must not execute'))
+    with pytest.raises(Error,match='user-systemd bus is unavailable'):
+        mod['command'](['systemctl','--user','show','unit'])
+
+
+def test_command_error_diagnostics_do_not_echo_stderr(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(Path,'exists',lambda p: True)
+    monkeypatch.setattr(mod['subprocess'],'run',lambda *a,**k: SimpleNamespace(returncode=1,stdout='',stderr='Failed to connect to bus: secret-value'))
+    with pytest.raises(Error) as error:
+        mod['command'](['systemctl','--user','show','unit'])
+    assert 'exit=1; category=user_bus_connection_failed' in str(error.value)
+    assert 'secret-value' not in str(error.value)

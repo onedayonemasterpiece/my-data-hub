@@ -24,10 +24,33 @@ IMAGE = re.compile(r'my-data-hub-control-plane:[0-9a-f]{40}')
 class RolloutError(RuntimeError): pass
 
 
+def systemd_env():
+    # Same current-user bus selection as Projects Hub's deployment installer.
+    # Direct Ops runners need not inherit an interactive login's bus variables.
+    runtime=Path(f'/run/user/{os.getuid()}')
+    bus=runtime/'bus'
+    if not bus.exists():
+        raise RolloutError('user-systemd bus is unavailable for current UID')
+    env=os.environ.copy()
+    env['HOME']=str(Path.home())
+    env['XDG_RUNTIME_DIR']=str(runtime)
+    env['DBUS_SESSION_BUS_ADDRESS']=f'unix:path={bus}'
+    return env
+
+
 def command(argv):
-    result = subprocess.run(argv, text=True, capture_output=True, timeout=180)
+    is_systemd=Path(argv[0]).name=='systemctl' and '--user' in argv
+    env=systemd_env() if is_systemd else None
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=180, env=env)
     if result.returncode:
-        raise RolloutError('command failed: ' + Path(argv[0]).name)
+        # Never emit raw stderr: it may contain configuration or unexpected data.
+        category='command_error'
+        if is_systemd:
+            error=result.stderr.lower()
+            if 'failed to connect to bus' in error: category='user_bus_connection_failed'
+            elif 'access denied' in error or 'permission denied' in error: category='permission_denied'
+            elif 'not found' in error or 'could not be found' in error: category='unit_or_executable_not_found'
+        raise RolloutError(f'command failed: {Path(argv[0]).name}; exit={result.returncode}; category={category}')
     return result.stdout.strip()
 
 
