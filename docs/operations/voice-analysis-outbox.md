@@ -127,3 +127,28 @@ original source and projection receipt, and records the observed case revision.
 Unknown intents, untriggered source notes, other owners and repositories are never
 enqueued by this mechanism. Linking remains an explicit Projects Hub operation;
 intake does not infer semantic groups or accept arbitrary destination paths.
+
+
+### Narrow image rollout and systemd precedence
+
+Run `python deploy/control-plane/rollout_voice_image.py --inspect` first. It returns
+only allowlisted command, image/container and unit path metadata. Confirm the
+actual `FragmentPath` and ordered `DropInPaths`; do not infer precedence from
+numbers in a filename. On the current host `voice-recovery.conf` sorts after
+`60-voice-image.conf`, so the latter cannot override its ExecStart.
+
+The managed default is `z-voice-analysis-image.conf`, after the verified recovery
+file. Keep both the existing recovery drop-in and its compose overlay unchanged.
+The helper appends only a control-plane image overlay to the effective existing
+compose chain, pins images by immutable ID, and preserves existing non-image
+settings. Before any container switch it reloads unit metadata and verifies the
+exact effective ExecStart and ExecReload. A shadowed/ineffective drop-in restores
+its prior metadata and stops without recreating containers. Never bypass that
+check by weakening argv equality or deleting the recovery file.
+
+Use a fresh immutable overlay filename for a new attempt. A previous failed
+attempt may have left an old-image rollback overlay; do not blindly remove it.
+Broad INSTALL refuses while either legacy `60-voice-image.conf` or current
+`z-voice-analysis-image.conf` exists; explicitly reconcile the preserved compose
+chain before a later broad release. PREPARE remains allowed. Credentials and
+private integration configuration require their separate approved setup.

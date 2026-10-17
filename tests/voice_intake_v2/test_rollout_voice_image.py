@@ -29,6 +29,10 @@ class Host:
     def __call__(self, args):
         self.calls.append(args)
         if args[:3] == ["systemctl", "--user", "show"]:
+            if "--property=FragmentPath" in args:
+                return "/home/dev/.config/systemd/user/my-data-hub-control-plane.service"
+            if "--property=DropInPaths" in args:
+                return "/home/dev/.config/systemd/user/my-data-hub-control-plane.service.d/90-recovery.conf"
             start = START
             if self.dropin.exists():
                 start = [
@@ -158,7 +162,8 @@ def test_broad_installer_guard_precedes_mutation():
     path = Path(__file__).resolve().parents[2] / "deploy/control-plane/install.sh"
     text = path.read_text()
     assert text.index("managed voice image override exists") < text.index("mkdir -p")
-    assert '"$action" != "PREPARE_CONTROL_PLANE" && -e "$voice_image_dropin"' in text
+    assert '"$action" != "PREPARE_CONTROL_PLANE" && ( -e "$voice_image_dropin" || -e "$voice_analysis_dropin" )' in text
+    assert "60-voice-image.conf" in text and "z-voice-analysis-image.conf" in text
 
 
 def test_rollback_pins_original_id_even_when_original_tag_moves(tmp_path):
@@ -281,3 +286,40 @@ def test_exec_start_guards_are_exclusive(tmp_path):
     host = Host(tmp_path / "unit.conf")
     with pytest.raises(Error, match="exactly one"):
         rollout(**kwargs(tmp_path, host), expected_start_sha256="0" * 64)
+
+
+def test_ineffective_dropin_rejected_before_container_change(tmp_path):
+    class ShadowedHost(Host):
+        def __call__(self, args):
+            if args[:3] == ["systemctl", "--user", "show"] and any(
+                x in args for x in ("--property=ExecStart", "--property=ExecReload")
+            ):
+                self.calls.append(args)
+                value = (
+                    START.replace("up --remove-orphans", "up -d --wait --remove-orphans")
+                    if "--property=ExecReload" in args
+                    else START
+                )
+                return "{ path=/usr/bin/docker ; argv[]=" + value + " ; ignore_errors=no ; status=0/0 }"
+            return super().__call__(args)
+
+    host = ShadowedHost(tmp_path / "unit.conf")
+    original = "[Service]\n# existing managed metadata\n"
+    host.dropin.write_text(original)
+    with pytest.raises(Error, match="before container switch"):
+        rollout(**kwargs(tmp_path, host), apply=True)
+    assert host.dropin.read_text() == original
+    assert host.image == OLD
+    assert not any("up" in call for call in host.calls)
+
+
+def test_inspect_reports_only_unit_path_metadata(tmp_path):
+    result = mod["inspect_current"](Host(tmp_path / "unit.conf"))
+    assert result["fragment_path"].endswith("/my-data-hub-control-plane.service")
+    assert result["dropin_paths"][0].endswith("/90-recovery.conf")
+
+
+def test_default_dropin_follows_verified_recovery_dropin():
+    source = (Path(__file__).resolve().parents[2] / "deploy/control-plane/rollout_voice_image.py").read_text()
+    assert 'f"{SERVICE}.d/z-voice-analysis-image.conf"' in source
+    assert "z-voice-analysis-image.conf" > "voice-recovery.conf"

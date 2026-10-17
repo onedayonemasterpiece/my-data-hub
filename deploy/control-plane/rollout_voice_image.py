@@ -147,6 +147,18 @@ def atomic(path, text):
             os.unlink(tmp)
 
 
+def unit_paths(run, property_name):
+    raw = run(["systemctl", "--user", "show", SERVICE, "--property=" + property_name, "--value"])
+    if len(raw) > 16384:
+        raise RolloutError("unit path metadata exceeds bound")
+    paths = shlex.split(raw)
+    if len(paths) > 64 or any(not re.fullmatch(r"/[A-Za-z0-9_./:@=-]+", path) for path in paths):
+        raise RolloutError("unsupported unit path metadata")
+    if property_name == "FragmentPath" and len(paths) != 1:
+        raise RolloutError("one unit fragment path required")
+    return paths
+
+
 def inspect_current(run=command):
     """Only allowlisted unit argv and nonsecret Docker identity/status fields."""
     start = systemd_argv(run(["systemctl", "--user", "show", SERVICE, "--property=ExecStart", "--value"]))
@@ -157,6 +169,8 @@ def inspect_current(run=command):
         raise RolloutError("ExecReload compose chain differs")
     return {
         "state": "inspection",
+        "fragment_path": unit_paths(run, "FragmentPath")[0],
+        "dropin_paths": unit_paths(run, "DropInPaths"),
         "exec_start": unit_line(start),
         "exec_reload": unit_line(reload_argv) if reload_argv else None,
         "service_state": run(["systemctl", "--user", "is-active", SERVICE]),
@@ -255,6 +269,7 @@ def rollout(
     atomic(rollback_override, json.dumps({"services": {"control-plane": {"image": expected_image}}}, indent=2) + "\n")
     atomic(override, overlay)
     activated = False
+    switched = False
     try:
         # Recheck source immediately before switching; no broad installer or restart.
         if systemd_argv(run(["systemctl", "--user", "show", SERVICE, "--property=ExecStart", "--value"])) != start:
@@ -264,6 +279,16 @@ def rollout(
         atomic(dropin, unit)
         activated = True
         run(["systemctl", "--user", "daemon-reload"])
+        if (
+            systemd_argv(run(["systemctl", "--user", "show", SERVICE, "--property=ExecStart", "--value"]))
+            != newprefix + suffix
+        ):
+            raise RolloutError("new drop-in is ineffective: ExecStart differs before container switch")
+        effective_reload = run(["systemctl", "--user", "show", SERVICE, "--property=ExecReload", "--value"])
+        expected_reload = newprefix + compose_parts(reload_argv)[1] if reload_argv else None
+        if (systemd_argv(effective_reload) if effective_reload else None) != expected_reload:
+            raise RolloutError("new drop-in is ineffective: ExecReload differs before container switch")
+        switched = True
         run([*newprefix, "up", "-d", "--no-deps", "control-plane"])
         deadline = time.monotonic() + timeout
         while True:
@@ -296,6 +321,23 @@ def rollout(
             "rollback_old_chain": [*rollback_prefix, "up", "-d", "--no-deps", "control-plane"],
         }
     except Exception as exc:
+        if activated and not switched:
+            # Only undo our own metadata change; no container recreation before switch.
+            if old is None:
+                dropin.unlink(missing_ok=True)
+            else:
+                atomic(dropin, old)
+            run(["systemctl", "--user", "daemon-reload"])
+            restored_start = systemd_argv(
+                run(["systemctl", "--user", "show", SERVICE, "--property=ExecStart", "--value"])
+            )
+            restored_reload_raw = run(["systemctl", "--user", "show", SERVICE, "--property=ExecReload", "--value"])
+            restored_reload = systemd_argv(restored_reload_raw) if restored_reload_raw else None
+            if restored_start != start or restored_reload != reload_argv or snapshot(run, prefix) != before:
+                raise RolloutError("pre-switch metadata restoration not confirmed; operator required") from None
+            raise RolloutError(
+                "ineffective drop-in rejected before container switch; prior metadata and containers unchanged"
+            ) from exc
         if activated:
             # Retain all prior drop-in settings and original compose overlays, adding
             # only the captured old image pin for this and future starts.
@@ -345,7 +387,7 @@ def main():
     parser.add_argument("--target-image")
     parser.add_argument("--override", type=Path)
     parser.add_argument(
-        "--dropin", type=Path, default=Path.home() / ".config/systemd/user" / f"{SERVICE}.d/60-voice-image.conf"
+        "--dropin", type=Path, default=Path.home() / ".config/systemd/user" / f"{SERVICE}.d/z-voice-analysis-image.conf"
     )
     parser.add_argument(
         "--voice-config-file",
