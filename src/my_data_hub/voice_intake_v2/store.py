@@ -725,15 +725,59 @@ class VoiceIntakeV2Store:
 
     def finish_analysis_projection(
         self, intent_id: str, *, receipt: dict[str, Any], error: str | None = None,
-        attempt: int, reconciliation_required: bool = False,
+        attempt: int, reconciliation_required: bool = False, completed: bool = False,
+        linked_members: list[str] | None = None, owner_id: str = "", repository: str = "",
     ) -> None:
         with self._transaction() as connection:
-            connection.execute(
+            current = connection.execute(
+                "SELECT receipt_json FROM analysis_outbox WHERE intent_id=? AND state='delivered' AND attempts=?",
+                (intent_id, attempt),
+            ).fetchone()
+            if current is None:
+                return
+            current_receipt = json.loads(current["receipt_json"])
+            desired_case = current_receipt.get("desired_case_id")
+            desired_revision = current_receipt.get("desired_input_revision", 0)
+            stale = desired_case and (receipt.get("case_id") != desired_case
+                                     or receipt.get("input_revision", 0) < desired_revision)
+            if desired_case:
+                receipt.update(desired_case_id=desired_case, desired_input_revision=desired_revision)
+            if stale:
+                completed = False
+                linked_members = []
+            result = connection.execute(
                 """UPDATE analysis_outbox SET state=?,lease_until=NULL,retry_at=?,receipt_json=?,last_error=?
                    WHERE intent_id=? AND state='delivered' AND attempts=?""",
-                ("projection_reconciliation_required" if reconciliation_required else "delivered",
+                ("projection_reconciliation_required" if reconciliation_required else
+                 "completed" if completed and not error else "delivered",
                  self._clock() + 60, json.dumps(receipt), error, intent_id, attempt),
             )
+            if result.rowcount != 1 or error:
+                return
+            # Only existing accepted triggered notes may be refreshed. Never enqueue
+            # arbitrary source paths or wake another owner/repository's records.
+            for member in linked_members or []:
+                if member == intent_id:
+                    continue
+                row = connection.execute(
+                    "SELECT * FROM analysis_outbox WHERE intent_id=? AND state IN ('completed','delivered')", (member,)
+                ).fetchone()
+                if row is None:
+                    continue
+                payload = json.loads(row["payload_json"])
+                prior = json.loads(row["receipt_json"])
+                if (payload["owner_id"] != owner_id or payload["source"]["repository"] != repository
+                        or (prior.get("case_id") == receipt["case_id"]
+                            and prior.get("input_revision", 0) >= receipt["input_revision"])):
+                    continue
+                if (prior.get("desired_case_id") == receipt["case_id"]
+                        and prior.get("desired_input_revision", 0) >= receipt["input_revision"]):
+                    continue
+                prior.update(desired_case_id=receipt["case_id"], desired_input_revision=receipt["input_revision"])
+                connection.execute(
+                    "UPDATE analysis_outbox SET state='delivered',retry_at=0,receipt_json=? "
+                    "WHERE intent_id=? AND state IN ('completed','delivered')", (json.dumps(prior), member),
+                )
 
     def analysis_status(self, intent_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

@@ -154,6 +154,8 @@ class AnalysisDelivery:
         receipt = json.loads(row["receipt_json"])
         error = None
         reconciliation_required = False
+        completed = False
+        members = []
         try:
             if (payload["owner_id"] != self.settings.owner_id
                     or payload["source"]["repository"] != self.settings.repository):
@@ -183,6 +185,18 @@ class AnalysisDelivery:
                     expected_previous_revision=receipt.get("projection_revision"),
                 )
                 receipt.update(projection_revision=projection["revision"], projection_commit=commit)
+            case_id = value.get("case_id")
+            input_revision = value.get("input_revision")
+            linked = value.get("member_intent_ids")
+            if (isinstance(case_id, str) and case_id and type(input_revision) is int and input_revision > 0
+                    and isinstance(linked, list) and len(linked) <= 1000
+                    and all(isinstance(member, str) for member in linked) and row["intent_id"] in linked):
+                # Old servers without lifecycle metadata retain the safe polling path.
+                receipt.update(case_id=case_id, input_revision=input_revision)
+                members = linked
+                completed = (value.get("projection_terminal") is True and bool(projection)
+                             and receipt.get("projection_revision") == projection["revision"]
+                             and bool(receipt.get("projection_commit")))
         except Exception as exc:
             # No note text, token, remote response or exception detail in logs.
             error = exc.code if isinstance(exc, VoiceIntakeError) else "projection_" + type(exc).__name__
@@ -193,7 +207,8 @@ class AnalysisDelivery:
             }
         self.store.finish_analysis_projection(
             row["intent_id"], receipt=receipt, error=error, attempt=row["attempts"],
-            reconciliation_required=reconciliation_required,
+            reconciliation_required=reconciliation_required, completed=completed,
+            linked_members=members, owner_id=self.settings.owner_id, repository=self.settings.repository,
         )
         return True
 

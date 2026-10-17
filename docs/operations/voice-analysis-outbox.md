@@ -111,3 +111,19 @@ images, build contexts, repository commits or logs.
 A removed or malformed original transcript heading is explicitly
 `analysis_source_structure_changed` / `projection_reconciliation_required`.
 The sender does not retry parsing indefinitely or rewrite the changed source.
+
+### Bounded final projection polling
+
+Projects Hub GET supplies `projection_terminal`, `case_id`, monotonically increasing
+`input_revision` within that case, and `member_intent_ids`. Only after the final
+projection's same-note Git write/readback is verified does the local row become
+`completed`, excluded from periodic polling. Older servers without lifecycle
+metadata retain polling rather than prematurely declaring completion.
+
+An active or newly accepted linked intent can refresh existing completed member
+rows once when its case changes or its input revision advances. The fenced receipt
+transaction checks the existing member's trusted owner and repository, retains its
+original source and projection receipt, and records the observed case revision.
+Unknown intents, untriggered source notes, other owners and repositories are never
+enqueued by this mechanism. Linking remains an explicit Projects Hub operation;
+intake does not infer semantic groups or accept arbitrary destination paths.

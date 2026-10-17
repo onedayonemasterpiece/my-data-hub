@@ -267,3 +267,92 @@ def test_private_config_file_fail_closed_without_secret_logging(tmp_path, monkey
     path.write_text('{"token": "secret-not-logged"}')
     assert not AnalysisSettings.from_env(config().repository).enabled
     assert payload["token"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_terminal_projection_stops_polling(tmp_path):
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    intent = {"intent_id": "voice:old", "owner_id": config().owner_id,
+              "source": {"repository": config().repository}}
+    with store._connect() as db:
+        db.execute("INSERT INTO analysis_outbox(intent_id,payload_json,state,receipt_json,created_at) "
+                   "VALUES(?,?,'delivered','{}',0)", (intent["intent_id"], json.dumps(intent)))
+    class Sink:
+        async def project_analysis(self, **kwargs):
+            return "verified-commit"
+    calls = []
+    def get(request):
+        calls.append(request)
+        return httpx.Response(200, json={**intent, "projection_terminal": True, "case_id": "voice:old",
+            "input_revision": 1, "member_intent_ids": ["voice:old"],
+            "projection": {"markdown": "final", "revision": hashlib.sha256(b"final").hexdigest()}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(get)) as client:
+        delivery = AnalysisDelivery(store, config(), Sink())
+        assert await delivery.project_once(client)
+        store._clock = lambda: 99999999999
+        assert not await delivery.project_once(client)
+    assert len(calls) == 1
+    assert store.analysis_status("voice:old")["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_new_linked_input_refreshes_completed_note_once(tmp_path):
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    revision = hashlib.sha256(b"previous").hexdigest()
+    def payload(name, owner=None):
+        return {"intent_id": name, "owner_id": owner or config().owner_id,
+                "source": {"repository": config().repository}}
+    with store._connect() as db:
+        for name, owner in [("old", None), ("foreign", "another-owner"), ("new", None)]:
+            receipt = {"projection_revision": revision, "projection_commit": "old-commit",
+                       "case_id": "old", "input_revision": 1}
+            db.execute("INSERT INTO analysis_outbox(intent_id,payload_json,state,receipt_json,created_at) "
+                       "VALUES(?,?,?,?,0)", (name, json.dumps(payload(name, owner)),
+                         "delivered" if name == "new" else "completed", json.dumps(receipt)))
+    writes = []
+    class Sink:
+        async def project_analysis(self, **kwargs):
+            writes.append(kwargs["intent_id"])
+            return "new-commit"
+    def get(request):
+        name = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={**payload(name), "projection_terminal": True, "case_id": "new",
+            "input_revision": 2, "member_intent_ids": ["old", "new", "foreign", "never-enqueued"],
+            "projection": {"markdown": "updated", "revision": hashlib.sha256(b"updated").hexdigest()}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(get)) as client:
+        delivery = AnalysisDelivery(store, config(), Sink())
+        assert await delivery.project_once(client)  # New input reawakens old, not foreign or unknown.
+        assert store.analysis_status("old")["state"] == "delivered"
+        assert await delivery.project_once(client)
+        store._clock = lambda: 99999999999
+        assert not await delivery.project_once(client)
+    assert writes == ["new", "old"]
+    assert store.analysis_status("old")["state"] == "completed"
+    assert store.analysis_status("foreign")["state"] == "completed"
+    assert store.analysis_status("never-enqueued") is None
+
+
+def test_new_case_observed_during_old_projection_prevents_stale_completion(tmp_path):
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    with store._connect() as db:
+        for name in ["old", "new"]:
+            payload = {"intent_id": name, "owner_id": config().owner_id,
+                       "source": {"repository": config().repository}}
+            receipt = {"case_id": "old", "input_revision": 1}
+            db.execute("INSERT INTO analysis_outbox(intent_id,payload_json,state,receipt_json,created_at) "
+                       "VALUES(?,?,'delivered',?,0)", (name, json.dumps(payload), json.dumps(receipt)))
+    old = store.claim_analysis_projection()
+    new = store.claim_analysis_projection()
+    assert old["intent_id"] == "old" and new["intent_id"] == "new"
+    store.finish_analysis_projection("new", attempt=new["attempts"], completed=True,
+        receipt={"case_id": "new", "input_revision": 2}, linked_members=["old", "new"],
+        owner_id=config().owner_id, repository=config().repository)
+    store.finish_analysis_projection("old", attempt=old["attempts"], completed=True,
+        receipt={"case_id": "old", "input_revision": 1}, linked_members=["old"])
+    assert store.analysis_status("old")["state"] == "delivered"
+    store._clock = lambda: 99999999999
+    retry = store.claim_analysis_projection()
+    assert retry["intent_id"] == "old"
+    store.finish_analysis_projection("old", attempt=retry["attempts"], completed=True,
+        receipt={"case_id": "new", "input_revision": 2})
+    assert store.analysis_status("old")["state"] == "completed"
