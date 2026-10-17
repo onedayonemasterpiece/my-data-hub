@@ -100,6 +100,7 @@ class VoiceIntakeV2Worker:
             if self.analysis_delivery and self.analysis_delivery.settings.delivery_ready:
                 self.analysis_delivery.stop_event.clear()
                 self._analysis_task = asyncio.create_task(self.analysis_delivery.run(), name="voice-analysis-delivery")
+            LOGGER.info("voice_v2_worker_started component=voice-intake-v2 worker_id=%s", self.owner)
 
     async def stop(self) -> None:
         self._stop.set()
