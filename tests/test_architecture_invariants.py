@@ -177,10 +177,12 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
     assert {
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "deploy").rglob("*")
-        if path.is_file()
+        if path.is_file() and "__pycache__" not in path.parts
     } == {
         "deploy/control-plane/Dockerfile",
         "deploy/control-plane/collect_deployment_evidence.py",
+        "deploy/control-plane/inspect_voice_readiness.py",
+        "deploy/control-plane/verify_voice_package.py",
         "deploy/control-plane/rollout_voice_image.py",
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
