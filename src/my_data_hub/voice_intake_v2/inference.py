@@ -7,7 +7,9 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -77,6 +79,19 @@ class AggregateGeminiInference:
         )
         self.requester = requester or AiohttpBoundedJSONRequester()
         self.clock = clock
+
+    def for_failures(self, consecutive_unavailable: int) -> AggregateGeminiInference:
+        """Rotate only explicitly allowed Lite models after definite outages."""
+        models = (self.settings.model, *(
+            model for model in self.settings.allowed_models if model != self.settings.model
+        ))
+        selected = models[(consecutive_unavailable // 3) % len(models)]
+        if selected == self.settings.model:
+            return self
+        return AggregateGeminiInference(
+            replace(self.settings, model=selected), limiter=self.limiter,
+            requester=self.requester, clock=self.clock,
+        )
 
     async def transcribe(
         self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any],
@@ -199,7 +214,7 @@ class AggregateGeminiInference:
             )
             response_body = response.json_body if isinstance(response.json_body, dict) else {}
             if not 200 <= response.status < 300:
-                raise self._http_failure(response.status, response.retry_after)
+                raise self._http_failure(response.status, response.retry_after, response_body)
             usage = self._usage(response_body)
             finish_reason = self._finish_reason(response_body)
             if finish_reason not in {"STOP", "UNSPECIFIED"}:
@@ -260,6 +275,7 @@ class AggregateGeminiInference:
             await self._record_failure(checkpoint, failure, lease, started, usage)
             raise failure from exc
         public = self.limiter.public_lease(lease, actual_tpm=usage.total_tokens if usage else None)
+        public["model"] = model
         receipt = InferenceReceipt(value=value.model_dump(mode="json"), request_uid=request_uid, limiter=public)
         if checkpoint is None:
             await self._finalize(lease, started, usage, "succeeded", None)
@@ -272,13 +288,36 @@ class AggregateGeminiInference:
         return await self.resume_receipt(checkpoint)
 
     @staticmethod
-    def _http_failure(status: int, retry_after: str | None) -> StageFailure:
-        delay = int(retry_after) if retry_after and retry_after.isdigit() else None
+    def _http_failure(
+        status: int, retry_after: str | None, body: dict[str, Any] | None = None,
+    ) -> StageFailure:
+        delay = None
+        if retry_after:
+            try:
+                seconds = float(retry_after)
+            except ValueError:
+                try:
+                    target = parsedate_to_datetime(retry_after)
+                    seconds = (target - datetime.now(UTC)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    seconds = math.nan
+            if math.isfinite(seconds):
+                delay = min(86400, max(0, math.ceil(seconds)))
+        # Never persist provider messages: they may echo private request data.
+        error = (body or {}).get("error")
+        raw_status = error.get("status") if isinstance(error, dict) else None
+        provider_status = raw_status if isinstance(raw_status, str) and raw_status in {
+            "INVALID_ARGUMENT", "UNAUTHENTICATED", "PERMISSION_DENIED", "NOT_FOUND",
+            "RESOURCE_EXHAUSTED", "FAILED_PRECONDITION", "INTERNAL", "UNAVAILABLE",
+            "DEADLINE_EXCEEDED",
+        } else None
         return StageFailure(
-            "provider_429" if status == 429 else "provider_rejected_request",
+            "provider_429" if status == 429 else (
+                "provider_unavailable" if 500 <= status < 600 else "provider_rejected_request"
+            ),
             sent=True, retryable=status in {408, 429} or 500 <= status < 600,
-            retry_after_seconds=min(delay, 86400) if delay is not None else None,
-            diagnostics={"http_status": status},
+            retry_after_seconds=delay,
+            diagnostics={"http_status": status, "provider_status": provider_status},
         )
 
     async def _record_failure(
@@ -287,6 +326,7 @@ class AggregateGeminiInference:
     ) -> None:
         error = "response_schema_invalid" if failure.code == "response_schema_invalid" else "provider_failure"
         failure.request_uid = lease.request_uid
+        failure.diagnostics["model"] = self.settings.model
         if checkpoint is None:
             if failure.code == "provider_429":
                 await self.limiter.report_provider_429(lease, retry_after_ms=None)

@@ -179,6 +179,8 @@ class StatusResponse(StrictModel):
     github_commit_sha: str | None = None
     retryable: bool = False
     retry_at: str | None = None
+    retry_after_seconds: int | None = None
+    status_message: str | None = None
     error_code: str | None = None
     reconciliation_required: bool = False
     transcription_request_uid: str | None = None
