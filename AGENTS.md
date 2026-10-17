@@ -47,3 +47,30 @@ the exact imported source to make derived decisions appear consistent.
 - Architecture tests reject production local PostgreSQL/PGDATA paths.
 - New pipeline stages define retry, timeout, terminal result and receipt contracts.
 - Documentation reports observed evidence and blockers rather than scaffold as proof.
+
+## Operational release continuity
+
+- Carry the owner's exact repository/action scope, decision reference, branch/SHA,
+  work ID, incident binding and completed receipts into every release handoff.
+  Preserve authorization already established in the session; this document does
+  not grant new permissions or override a tool denial.
+- When using DevCoveer, configure the existing work delivery contract for the
+  requested product outcome. Bind evidence to the current candidate fingerprint.
+  Source CI, a healthy deployment and real owner acceptance are separate results.
+  Keep unanswered product criteria open after a source-only task completes.
+- Before a voice image rollout and after container replacement, run the installed
+  package and safe readiness checks in
+  [the voice release runbook](docs/operations/voice-analysis-outbox.md).
+  A checkout, image label or stale `/app/src` copy does not establish the Python
+  package actually selected by the running interpreter.
+- Preserve the verified effective systemd/compose chain and the existing private
+  integration configuration. Use the guarded narrow rollout, exact source/image
+  identities and post-rollout readback; keep recording recovery intact.
+- Record the actual failure category. A tool approval denial blocks that action;
+  do not route it through another identity or tool. After a lost/denied/unknown
+  mutation, reconcile saved state before retry. A schema or work/incident binding
+  error is corrected against observed state. A provider failure in an optional
+  review does not replace successful required checks or block other authorized work.
+- Never invent an approval ID or button, or claim an external reviewer was fixed
+  without evidence. If a permission problem truly remains, finish unaffected work
+  and report the exact blocked action, reason and existing decision evidence.
