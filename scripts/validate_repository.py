@@ -1762,13 +1762,19 @@ def validate_deployment(report: Report) -> None:
         compose_files == {"compose.yaml", "compose.control-plane.yaml", "compose.showcase.yaml"},
         f"unclassified Compose deployment profile exists: {sorted(compose_files)}",
     )
-    deploy_files = {path.relative_to(ROOT).as_posix() for path in (ROOT / "deploy").rglob("*") if path.is_file()}
+    deploy_files = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "deploy").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
     expected_deploy_files = {
         "deploy/control-plane/Dockerfile",
         "deploy/showcase-runtime/Dockerfile",
         "deploy/showcase-runtime/nginx.conf",
         "deploy/showcase-runtime/runtime.env.example",
         "deploy/control-plane/collect_deployment_evidence.py",
+        "deploy/control-plane/inspect_voice_readiness.py",
+        "deploy/control-plane/verify_voice_package.py",
         "deploy/control-plane/rollout_voice_image.py",
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",

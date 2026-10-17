@@ -163,7 +163,7 @@ def verify(args):
             raise VerificationError("invalid_container_id")
         target = {"container_id": args.container}
         command = ["docker", "exec", args.container, "python"]
-    package = json.loads(capture(command + ["-c", CHILD_SCRIPT]))
+    package = json.loads(capture([*command, "-c", CHILD_SCRIPT]))
     actual, root = package["files"], package["package_root"]
     if not isinstance(actual, dict) or not actual or not isinstance(root, str) or not Path(root).is_absolute():
         raise VerificationError("invalid_package_manifest")
