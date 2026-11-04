@@ -1,161 +1,94 @@
-# Проект реализации: значимое новое в регионе и общий Kaggle runtime
+# Исправленный проект: первый работающий цикл и карточка «что нового»
 
-Дата: 04.11.2026. Статус: готовый проект реализации для аудита; начальный общий source slice реализован отдельно. Действующие решения владельца: [owner-decisions.md](owner-decisions.md). Точка входа аудитора: [OPUS-AUDIT.md](OPUS-AUDIT.md).
+Редакция после CHANGES_REQUIRED, 04.11.2026. Заменяет порядок W0–W7/R1–R5 из предыдущего плана. [Ответ на аудит](AUDIT-RESPONSE.md), [полученное резюме](OPUS-AUDIT-SUMMARY.md), [решения и открытая продуктовая граница](owner-decisions.md).
 
-## 1. Результат и границы
+**Ближайший результат:** реальная региональная публикация превращается в карточку с объяснением новизны и источником; после сохранения, остановки и запуска нового Kaggle notebook та же карточка читается через MCP.
 
-Пользователь получает через My Data Hub подборку **новых общественно значимых изменений в Калининградской области**, каждое с понятным объяснением нового, временем события/обнаружения, местом или объектом, первичными ссылками и основанием сравнения с прежним состоянием. Повторный URL/репост известного факта не создаёт новую новость. Сбор и состояние обработки сохраняются при смене Kaggle executor.
+Срез platform.status в этой подготовке: control_plane_ready=true, master_state=ABSENT, deployed_commit=f7eb3c5f674b772751c815aa055a52f1f52e1828. Работающий master с полезными данными здесь не доказан. Первый этап должен получить это доказательство, а не «сохранить уже работающий master».
 
-Первый интерфейс — существующий MCP MDH: предметные получение списка/подробности/поиск и статус актуальности корпуса. В этой поставке не нужен отдельный сайт, мобильное приложение, публикация в TG/VK, новый чат-бот или новый публичный gateway. Не требуется сначала реализовать все тренды, гостей и истории людей. Их будущие потребности учитываются полным raw, identities, revisions, mentions и ссылками на POI.
+## 1. Минимальная топология
 
-Шесть часов — продуктовая цель от публикации/доступности источника до обнаружения. Capture lag и analysis lag измеряются отдельно. При quota-block действует принятая замена executor; неизвестная реальная доступность после замены не заменяется ложным обещанием срока.
+Один Kaggle notebook содержит PostgreSQL, сбор одного разрешённого источника и обработку публикаций через OpenCode. Существующий лёгкий MDH control plane управляет запуском и даёт MCP-доступ через нынешний master resolver/data plane. PostgreSQL остаётся единственной канонической БД. Один lifecycle owner управляет этим notebook и Dataset.
 
-## 2. Что уже существует и что меняется
+Цикл: **восстановить → собрать → оценить → сохранить → остановиться**. При исчерпании пригодных бесплатных моделей цикл сохраняет полученное и завершается; следующий notebook восстанавливает Dataset и продолжает незавершённые публикации. В этой топологии меняется и процесс PostgreSQL. Прежнее требование независимой жизни master и executor было решением автора плана; для пилота оно снято.
 
-| Обязанность | Сейчас | Целевое изменение |
-|---|---|---|
-| PostgreSQL/master | MDH coordinator, single writer/epoch, Dataset checkpoint | Сохранить owner; добавить RKB-style exact recovery journal и совместимый Dataset adapter |
-| Ingress | ConnectorEnvelope, landing, idempotency, durability; daily-statistics committer | Расширить существующий dispatch по data_product и добавить regional-monitoring handler |
-| Контент | actor/account/content_item/body_excerpt, identities, assets, provenance | Аддитивные full revisions/chunks/mentions/novelty; старые потребители не переосмысливаются |
-| Поиск | FTS, E5/BGE contracts, blogger_compact_v1 | Отдельный content/chunk search contract с BGE512; прежние пространства сохраняются |
-| Runtime | Отдельные реализации РКБ/EventsBot/MDH и DAEP design | Один пакет kaggle-runtime + адаптеры, удаление заменённых локальных нейтральных функций |
-| OpenCode | Отдельный локальный server, DAEP pinned requirement | Общий bootstrap/update/process adapter с фактической версией и чистым auth context |
-| Модельные ресурсы | ai-resource-control workload API, consumer versions различаются | Один существующий admission/accounting authority, охватывающий реальные sends |
-| Product API | Ограниченный существующий MCP | Добавить предметные методы novelty через существующий каталог и ACL |
+Публичные MCP authentication/scopes, ограниченные роли БД, single-writer epoch и существующий статус ресурсов сохраняются. Упрощение не открывает generic SQL пользователю и не создаёт PostgreSQL на Dev. Отдельные executors, очередь стадий, новый WSS protocol, новый controller и обязательное подключение kaggle-runtime не входят в критический путь.
 
-Новый пакет не является обязательным центральным сервером. RunCoveer и DevCoveer могут иметь собственные controllers и WSS endpoints, использовать одну версию библиотеки и владеть разными физическими пулами. Существующая общая resource authority остаётся общей зависимостью, когда речь идёт об одном provider/account бюджете.
+## 2. Сначала один lifecycle, без второй checkpoint-системы
 
-## 3. Размещение и владельцы
+Использовать существующие PG/start/roles/tunnel примитивы. Сократить существующую сборку, не добавлять параллельный pilot entrypoint с собственным lifecycle.
 
-| Компонент | Где работает | Владелец состояния |
-|---|---|---|
-| MDH API/MCP, scheduler, callbacks, operation ledger | Существующий лёгкий control plane | MDH |
-| Ограниченный exact recovery spool | Существующая control SQLite MDH | Тот же MDH lifecycle owner; не новый сервис |
-| Единственная canonical PG + FTS/pgvector | Kaggle master | Текущий master generation |
-| Dataset current/previous verified checkpoints | Private Kaggle Dataset | Checkpoint owner MDH |
-| Capture/semantic executors | Независимые Kaggle executions | Controller соответствующего продукта |
-| BGE | Kaggle embedding profile | Encoder adapter, input contract |
-| OpenCode process | Kaggle executor; локальные установки используют общий updater | Executor adapter |
-| Shared code | Приватный kaggle-runtime | Один upstream-пакет, версии потребителей |
-
-Исчерпание LLM квоты меняет executor, не PG master. Master и BGE могут быть размещены по принятому RKB профилю после проверки памяти; это не причина связывать их жизнь с бесплатной моделью OpenCode. Pool admission учитывает реальную ёмкость аккаунта без обещания универсального числа notebook slots. DAEP-specific 1–4 workers не становится глобальным числом.
-
-WSS доставляет команды, состояние и ограниченные результаты. Существующий MDH SSH PostgreSQL data plane не удаляется лишь потому, что появился общий WSS. Его замена допустима только при сохранении epoch/role isolation и при наличии работающего пути того же трафика. Большой PG archive передаётся из Kaggle напрямую по scoped transfer, не через JSON frames или Dev filesystem.
-
-## 4. Первый shared slice и следующий перенос
-
-В kaggle-runtime начат пакет Python 3.11+ без runtime dependencies: строгий JSON codec из РКБ, stable release/freshness policy, неизменяемый attempt pin, stop-before-replace policy и explicit credential subset. Его исходники и тесты полностью доступны в [снимке для аудита](shared-runtime-source.md). Это рабочие функции, но ещё не controller loop/driver/WSS service.
-
-Для каждого следующего переноса фиксируются donor module@SHA, сохраняемый wire/SQL контракт, новый owner module, два consumer adapter и удаляемые локальные функции. Не начинать с механического копирования многотысячного файла с domain handlers.
-
-| Шаг | Общий код | Адаптеры/удаляемое дублирование | Критерий |
-|---|---|---|---|
-| R1 | generic codec, release policy, rotation policy | Начальный пакет уже создан; adapters ещё не подключены | 16 различающих unit tests и import/compile |
-| R2 | WSS auth attach, generation routing, bounded queues, reconnect | RKB bge_channel/bge_wss_transport оставляют handlers; MDH runtime_sdk подключает общий transport | Один transport используется двумя adapters; delayed frame не создаёт чужой эффект |
-| R3 | Kaggle intent/push/status/reconcile/terminal observation | EventsBot/MDH provider operations; dataset-loop delete-as-stop не переносится | Потеря ответа на launch/stop не создаёт второй execution |
-| R4 | OpenCode bootstrap, release acquisition, native session/events/cancel, rotation execution | Consumer даёт model roles/tool allowlist; install/retry logic уходит из локальных скриптов | Fresh executor с пустым auth context продолжает ту же job после stop |
-| R5 | RKB exact journal/coverage/capture/restore interfaces | MDH PG/SQL/route registry, существующий ledger; RKB-specific Case forcing остаётся у РКБ | Kernel loss → Dataset base → exact replay → полезный read без нового inference |
-
-R2 и R3 разрабатываются ограниченными изменениями; не делать готовность всего универсального framework условием первого MDH источника. Но shared adoption считается завершённым только после реальной зависимости двух потребителей и удаления заменённых локальных реализаций. Копия снимка в документации не считается вторым consumer.
-
-## 5. Поток данных первого продукта
-
-1. Scheduler выбирает существующий разрешённый источник и cursor. Исполнитель переносит начальный набор из реально используемого source registry EventsBot, затем фиксирует его в MDH; не выдумывает живые channel IDs и не просит владельца выбирать SQL/миграции.
-2. Обычный connector получает материал с platform/external_id/source_revision, опубликованным/наблюдённым временем и media URLs. Telethon session имеет одного владельца; local E2E credentials не подставляются вместо production source identity.
-3. Existing landing/ingress принимает полный смысловой текст и exact revision. Повтор той же identity/revision возвращает прежний outcome. Cursor продвигается вместе с принятием покрытой порции, не после окончания всех LLM-стадий.
-4. На accepted revision создаётся задача нормализации/чанков, lexical search и enrichment. Полный текст не режется до BGE512: ограничиваются только отдельные encoder inputs с offsets в полном тексте.
-5. Смысловая роль извлекает candidate change: предмет, тип изменения, факт, effective time, место, evidence spans. Поля, взятые из операторской инструкции, не становятся source evidence.
-6. Роль сопоставления получает bounded candidates из существующего корпуса: exact identity/alias/FTS/BGE и прежнее состояние предмета. Итог — новое значимое изменение, повтор, уточнение прежнего либо недостаточно основания. Неоднозначность хранится в данных и не блокирует независимые материалы.
-7. Одна предметная транзакция сохраняет итог и обязательный outbox. Повтор доставки не вызывает LLM заново и не дублирует карточку. Отдельная failure одного материала не блокирует весь run.
-8. Предметный MCP возвращает полезные результаты с источниками, периодом, capture/analysis lag и известным coverage; отсутствие обработанных материалов не превращается в «ничего нового».
-
-Изображения — ссылки и подписи. Не вводится скачивание архива изображений. Для удаления/редактирования source появляются новые ревизии/статусы, прежняя evidence-связь не переписывается незаметно.
-
-Конкретные предлагаемые миграции, модули, ingress и API: [novelty-implementation.md](novelty-implementation.md). Они названы как планируемые файлы и не выдаются за уже существующий код.
-
-## 6. Сохранение и остановка по РКБ
-
-Применяется проверенная цепочка RKB: exact command/outcome в ограниченном Dev recovery store → canonical PG apply → verified Dataset coverage. Архив PG не хранится на Dev; Dev journal содержит точные recovery bytes, не канонический query corpus. Отдельный ADR описывает это отличие от старой формулировки «metadata only».
-
-Групповая policy до оптимизации: quiet 900s, интервал 1800s, planned stop и необходимые schema boundaries. Нет Dataset upload каждой статьи. Таймер checkpoint не является useful-idle. MDH useful window=2220s по ранее явному требованию, при donor default 1800s. Подробности clock/restart/capture/current-owner в [RKB evidence](rkb-storage-evidence.md).
-
-Во время capture фиксируется пригодный prefix, затем длительная передача не держит весь intake lock. Позднейшие операции не получают Saved от прежней версии. Lost create/version ACK сверяется по сохранённому publication intent. Retired writer не продвигает pointer. Kernel loss восстанавливает последний verified base и exact journal tail; модель не запускается повторно для реконструкции уже полученного вывода.
-
-Внешний backup на диск/другое облако не проектируется. Current/previous Dataset — основной механизм. Полная совместная потеря Dev journal и kernel покрывается лишь последней verified версией; обычный kernel loss покрывается Dataset+сохранным Dev journal.
-
-### Ёмкость
-
-Цель active DB <100 GB реализуется как учёт data+indexes+retained revisions и понятная политика роста. Сначала рабочий объём ограничен измеренной допустимой ёмкостью, без удаления непокрытого результата. Current donor hard caps 8 GiB archive/16GiB unpacked/900s restore проходят через несколько validators; изменение одного значения недопустимо.
-
-Перед повышением рабочего размера согласовать один capacity profile для config, capture, tar, transfer ticket, readback, restore, free-space и STOP deadline. Измерить действительный active PGDATA плюс временный pg_basebackup/tar/readback и время восстановления. Если полный capture не укладывается, оптимизируется существующий Dataset path; лёгкий incremental режим не объявляется реализованным по старой фразе docs 15min/4h. Эта техническая работа не возвращается владельцу вопросом о бэкапах.
-
-## 7. OpenCode bootstrap, freshness и credentials
-
-### Запуск
-
-Bootstrap — обычный скрипт, без LLM для установки. Он устанавливает exact выбранный OpenCode artifact, нужные workload dependencies, подключает общий runtime и запускает native OpenCode server/CLI. Control attach появляется до тяжёлой подготовки, readiness — после реальной готовности заданного профиля. GitHub доступа для capture не нужно; code-writing профиль DAEP получает свои отдельные разрешения.
-
-Default provider credential map пуста. Fresh environment не получает предыдущие auth.json, config secrets, session cache и ambient provider keys. Явный scoped key alias разрешён только для требующего ключ провайдера; provider key и Kaggle launch credential — разные секреты. Kaggle control credentials остаются у controller, executor получает только необходимые scoped операции/transfer tickets. Наличие пустого env dict не считается достаточной изоляцией, если процесс всё ещё читает чужой auth directory.
-
-### Обновление
-
-Общий updater получает официальный перечисляемый stable release feed, а не только endpoint latest. Начальная major для нового внедрения — v2 после проверки нужных native server/session/MCP контрактов; v1 поддерживается лишь на переходе существующих consumers. Нельзя перезаписать активный attempt pin.
-
-Инженерный default: discovery раз в 24 ч и при подготовке окружения с кешем; promotion совместимого релиза для новых attempts в пределах 24 ч после успешной проверки. Если релиз несовместим, причина и следующая проверка видны; это не бессрочное freeze. Новая major — отдельная migration task. Last-known-good применяется временно при отказе update source/регрессии, с явным возрастом наблюдения.
-
-В v1 autoupdate только уведомляет; в v2 global update=auto может установить файл, но не перезапускает server. Поэтому управляющий код различает available/selected/installed/running version и активирует обновление новым процессом. Локальная установка DevCoveer тоже входит в эту политику; текущий факт active server без semantic version не аттестует свежесть.
-
-После all-eligible-free quota exhaustion запускается stop/fresh последовательность. Перед остановкой полезные stage payload передаются через normal ingress/journal. Новый executor получает continuation незавершённых стадий, не весь уже принятый job. Модельный catalogue и capability/availability probe обновляются отдельно от бинарника. Реальный send, включая internal retries/subagents, должен проходить общий admission/accounting; если native OpenCode не предоставляет нужный hook, это явная интеграционная задача R4, а не скрытый обход authority.
-
-## 8. Пакеты исполнения и зависимости
-
-| Приоритет / work package | Вход и owned scope | Завершённый результат | Зависит от |
-|---|---|---|---|
-| P0 / W0 решения и аудит | Документы текущего пакета; immutable source snapshots | Opus может проверить проект с доступом MDH+RKB | Выполняется сейчас |
-| P0 / W1 общий runtime | kaggle-runtime/src/tests + thin adapters | R2/R3 с двумя consumers без duplicate core | Начальный R1 уже реализован |
-| P0 / W2 durable MDH | Existing control ledger, master coordinator, connector durability, PG profile | Exact command replay и verified checkpoint по RKB | ADR journal; R3/R5 interface |
-| P0 / W3 raw/capture | Аддитивные SQL миграции и regional_monitoring ingress | Реальный полный raw сохраняется при сбое LLM, capture cursor восстанавливается | Existing master + W2 durability |
-| P0 / W4 OpenCode executor | Shared bootstrap/updater/provider adapter + MDH roles | Current OpenCode, no inherited keys, quota→fresh continuation | W1, common resource authority |
-| P1 / W5 significant novelty | Chunk/BGE, prior-state lookup, semantic change apply | Повтор не новое, новое имеет evidence/время/место | W3/W4 |
-| P1 / W6 MCP и продуктовая проверка | Existing catalog/API/ACL + fixtures/реальный corpus | Подборка и карточка доступны пользователю, срок/coverage видны | W5 |
-| P2 / W7 расширение | People/projects/POI, trends/guests, additional consumers | Новые результаты на том же корпусе/общем runtime | Принят первый продукт |
-
-Один интегратор владеет общей веткой поставки каждого репозитория. Исполнитель не меняет чужой live runtime и не создаёт параллельный controller того же kernel. Перенос РКБ идёт небольшими совместимыми изменениями; текущий книжный импорт не является испытательным стендом для первого MDH workload.
-
-## 9. Приёмка без бюрократического второго проекта
-
-Проверки выбираются для реально изменённой границы. Уже успешная проверка неизменённого кода не повторяется ради нового статуса.
-
-| Сценарий | Что отличает правильный результат |
+| Существующий участок | Изменение |
 |---|---|
-| Прочитан реальный пост, LLM недоступна | Raw и capture cursor не потеряны; analysis lag отдельно |
-| Тот же материал пришёл повторно/другим ingress | Один source revision, прежний apply outcome |
-| Два сайта перепечатали известный факт | Не возникает две независимые новинки |
-| Новый факт об известном объекте | Описано конкретное изменение и предыдущий контекст |
-| Исчерпаны free роли | Старый executor stopped, новый exact execution продолжает хвост, keys не наследованы |
-| Потерян start/stop ACK | Сверка прежнего intent, нет параллельного второго execution |
-| Kernel master потерян после PG apply до Dataset | Dataset base + Dev journal возвращают принятый факт без повторного inference |
-| Поздний результат старого worker | Не меняет canonical state; immutable result можно прочитать/переиспользовать |
-| Checkpoint создался, ответ потерян | Exact publication readback, без второй версии из-за timeout |
-| Stable OpenCode обновился | Новые attempts используют проверенный релиз, старый pin неизменён; running version подтверждена |
+| `src/my_data_hub/master_runtime/postgres.py` | Использовать запуск/остановку PG |
+| `src/my_data_hub/master_runtime/bootstrap.py` | Упорядочить logical restore: init PGDATA → start PG → pg_restore → migrations/roles → epoch/tunnel/ready |
+| `src/my_data_hub/master_runtime/notebook_entrypoint.py` | Оставить один обычный путь запуска, обработки и сохранения; снять обязательную сборку acceptance/verifier и независимых workers |
+| `src/my_data_hub/control_plane/runtime.py`, существующий master coordinator | Оставить одного владельца запуска и остановки; заменить его checkpoint wiring, не запускать второго владельца тех же ресурсов |
+| `src/my_data_hub/checkpoints/kaggle_runtime.py`, `publisher.py` | Свести выбранный runtime path к одному dump/Dataset save/restore adapter; не подключать поверх него RKB recovery stack |
+| `checkpoints/brokered_upload.py`, `checkpoints/acceptance*.py`, `acceptance/checkpoint_launcher.py`, отдельный verifier notebook | Убрать зависимость обычного pilot cycle от этой orchestration; удалить ставшие недостижимыми функции и их тесты после проверки callers |
 
-Первый source-only пакет проверен unit tests; эти сценарии целиком требуют будущей интеграционной и живой проверки. Для живого принятия исполнитель фиксирует конкретные источники, интервал, полученные материалы, полезную подборку и восстановленный результат. Красивый README, import или HTTP200 не являются такой приёмкой.
+Важное различие: нынешний `MasterBootstrap` вызывает physical restore **до** запуска PG. Логический `pg_restore` требует запущенной PostgreSQL. Нельзя подменить callback на `pg_restore`, сохранив прежний порядок.
 
-## 10. Совместимость, переход и возврат
+Перед переходом проверить существующие Dataset/checkpoint pointers и данные. ABSENT не означает отсутствия старого снимка. Если есть physical checkpoint прежнего MDH формата, один раз восстановить его старым reader в Kaggle и сохранить logical baseline; не стартовать пустую БД поверх имеющихся данных. После перехода нормальный путь один. Код старого reader удаляется после миграции нужных снимков; два действующих publishers одного Dataset недопустимы.
 
-Миграции только аддитивные и последовательные. Новый source_revision/chunk search contract не переопределяет blogger_compact_v1 и не меняет смысл hub.project. До подтверждения полного corpus path Region Talk migration и publication остаются в текущем состоянии.
+### Предлагаемый storage contract — требует решения о несохранённом хвосте
 
-Переход adapter выполняется на одном controller/pool: остановить выдачу новых claims старому владельцу, завершить/reconcile его операции, передать подтверждённое состояние, затем активировать нового. Нет двух writers одной canonical revision. Возврат к прежней версии adapter требует чтения сохранённых операций того же формата; нельзя откатывать schema удалением новых raw/evidence.
+В пилоте предлагается **не переносить Dev payload journal**. PostgreSQL хранит raw revisions, ответы моделей, незавершённую работу и cursors. Данные порции и её cursor фиксируются одной транзакцией.
 
-Package upgrades ограничены declared compatibility. Schema/native-handler revision pin для replay меняется только через предусмотренную migration boundary; старые exact commands не применяются другим handler без явной совместимости. Секреты и production данные не попадают в audit snapshot.
+Перед плановой остановкой прекратить новые записи, завершить текущие транзакции, выполнить согласованный `pg_dump -Fc` и создать версию private Dataset. После штатного подтверждения публикации сохранить references current/previous и остановить notebook. Если ответ о публикации потерян, сверить **тот же** snapshot ID/version штатным API; не создавать следующую версию вслепую. Отдельные proof graphs, журнал команд, replay phases и verifier notebook не добавляются.
 
-## 11. Риски для решения аудитора
+При старте восстановить current в чистую запущенную PG, применить миграции и открыть обычный MCP path. При неудаче current использовать previous; обе неудачи не заменять незаметно пустой БД. Достаточным первым доказательством восстановления служит настоящий повторный запуск с чтением сохранённой карточки.
 
-1. RKB current full physical capture и hard size caps ограничивают рост сильнее общего желания <100 GB. Нужен размерный профиль и доказанный путь, не обещание incremental backup из docs.
-2. MDH старое metadata-only описание нужно согласовать с exact payload journal РКБ. Самовольная вторая бизнес-БД на Dev недопустима.
-3. Native OpenCode retries/subagents должны учитываться common admission; нынешний pure package этого не делает.
-4. Transport compatibility: RKB WSS, MDH SSH data plane, DAEP HTTPS long polling — разные существующие границы. Новый общий пакет не должен ломать их ради одинакового имени.
-5. Fresh Kaggle может не дать пригодной модели. Это проверяется при запуске; корректное recovery не объявляет результат модели или quota reset заранее.
-6. Доказательства из чужих репозиториев в audit snapshot датированы и не означают их deployment. Изменение этих источников требует обновить только затронутую часть snapshot.
+**Цена выбора:** после внезапной потери notebook теряется хвост после последнего подтверждённого снимка. Доступные посты можно собрать снова; модельные результаты могут потребовать повторного вызова. Удалённая или изменённая публикация не обязана восстановиться в прежнем виде. Эта потеря ещё не согласована владельцем; предложение не выдаётся за прежнюю гарантию exact replay. Независимые задачи запуска PG, raw capture и предметного чтения можно готовить до решения; нельзя обещать аварийную сохранность каждого COMMIT.
 
-У этих пунктов есть технические владельцы и проверяемые исходы в W1–W6. Они не превращаются в повторный список вопросов владельцу о SQL, backup или роли миграций.
+Dataset не обновляется после каждой строки. Первый запуск ограничен коротким продуктовым циклом; для долгой сессии потребуется групповое сохранение по наблюдённой длительности, поскольку save только на STOP не ограничивает аварийный хвост. Live РКБ и его текущие гарантии не меняются.
+
+## 3. Один источник, SQL-очередь, одна оценка публикации
+
+Начать с одного уже разрешённого сайта/ленты региона со стабильными URL. Не открывать новый discovery и не ждать подключения TG/VK. Full source revision сохраняется до вызова модели. Редактирование поста создаёт новую revision; повтор тех же source/post/revision исключается unique constraint.
+
+Новая предметная миграция добавляет только недостающие полную revision, её cursor и результат; конкретная форма приведена в [novelty-implementation.md](novelty-implementation.md). Pending выбираются SQL по отсутствующему результату и допустимому времени следующей попытки. Один последовательный notebook loop не требует межпроцессных leases, stage_run, worker_result_inbox и нового workflow engine.
+
+Нормальный путь — один модельный запрос на новую revision. В него входят полный материал и релевантное прошлое из SQL/FTS. Модель одновременно возвращает: что изменилось, почему это значимо для региона, время/объект, source evidence и связь с прежним. Отдельные extract/judge/writer вызовы не создаются. Полный ответ сохраняется в PG.
+
+Полный текст и offsets чанков не обрезаются ради encoder/model лимита. Если материал не помещается в доступный контекст, он остаётся сохранённым и отмеченным как необработанный; используется подходящий разрешённый маршрут, а другие посты продолжают обрабатываться. Техническая ошибка не превращается в «нового нет». BGE и отдельные embedding workers следуют после первой карточки, когда будет конкретная потребность улучшить поиск.
+
+MCP даёт `novelty.list`, `novelty.get` и состояние coverage: источник/время, что нового, сравнение с прежним, ссылки; отдельные capture/analysis lag и непроанализированный хвост. Репост известного факта не считается независимым подтверждением. Интерфейс не требует от владельца SQL или ручного управления notebook.
+
+## 4. Свежий OpenCode обычной установкой
+
+На каждом старте нового notebook использовать официальный текущий installer OpenCode 2 и запускать установленный им бинарник. В bootstrap достаточно:
+
+```bash
+set -euo pipefail
+curl -fsSL https://opencode.ai/v2/install | env -u VERSION bash -s -- --no-modify-path
+"$HOME/.opencode/bin/opencode" --version
+```
+
+`VERSION` удаляется только из среды установщика, чтобы случайный старый pin не отменил свежую установку. Установщик сам получает актуальную версию через официальный update endpoint. В журнал цикла записывается фактическая версия; рабочая команда использует тот же абсолютный путь. Отдельные release feed, promotion/canary service и SHA-пины бинарника в пилоте не нужны. Это описание будущего bootstrap, не сообщение о выполненной установке.
+
+Provider keys/auth не наследуются из предыдущего notebook. При обязательном ключе используется только явно заданная владельцем привязка. Kaggle control credentials и transport auth сохраняют собственные роли. Источники: [официальная установка](https://dev.opencode.ai/v2/docs/), [installer](https://opencode.ai/v2/install), [CLI](https://dev.opencode.ai/v2/docs/cli/commands/).
+
+## 5. Замер доступности на полезной работе
+
+Первую карточку не откладывать на сутки. В обычный цикл включить уже доступные execution logs: run ID, OpenCode version, фактические provider/model, число входных/успешных постов, ошибки по причинам, время и длительность, размер PG через `pg_database_size`.
+
+Если возникнет quota refusal, сохранить цикл, остановить старый execution и записать результат следующей настоящей задачи в fresh окружении. Это измеряет доступность; наличие новой среды само по себе не означает новую квоту. Объявленный provider cooldown учитывается, бесконечный цикл запусков не создаётся. Суточное наблюдение может продолжить обычный пилот после первого результата. Отдельный 24-часовой benchmark этим документом не запускается.
+
+100 ГБ остаются верхним продуктовым ориентиром, а не входным объёмом первой приёмки. Работы по такому размеру и внешние backup copies отложены. Рост измеряется на реальном корпусе; скорость накопления «мегабайты в сутки» заранее не считается измеренной.
+
+## 6. Порядок исполнения и единственная первая приёмка
+
+1. **Lifecycle с данными:** один current/previous Dataset path, PG, предметное чтение MCP, save → stop → fresh start → restore → то же чтение. Первый baseline создаётся только при установленном отсутствии прежних данных.
+2. **Настоящий источник:** одна публикация и cursor через предметный master handler, без дубля при повторном capture.
+3. **Первая карточка:** один вызов модели, сохранённый полный результат, `novelty.list/get` с источником и объяснением.
+4. **Та же карточка после нового запуска:** тот же revision/result, новое выполнение Kaggle, чтение через обычный MCP. Уже покрытый снимком результат не вычисляется заново. Этот сценарий закрывает продукт и storage path вместе.
+5. **По фактической потребности:** больше источников, BGE, расписание, улучшение качества; общая библиотека — когда появляется второй реальный consumer того же кода.
+
+Доказательство: ссылка на исходный пост, его сохранённая revision, карточка, точная Dataset version и успешное чтение после нового запуска. HTTP200, unit tests, наличие файла и число commits это доказательство не заменяют.
+
+## 7. Общее переиспользование без обязательного framework
+
+`kaggle-runtime` остаётся созданным репозиторием. Только codec был частично извлечён из РКБ; rotation/releases — новые неиспользуемые политики, не доказанный перенос. Они не являются зависимостью пилота и не задают обязательную архитектуру.
+
+Сначала использовать работающие primitives и существующие owners MDH. При появлении второго consumer извлечь совпавший нейтральный provider/transport/bootstrap код в общий package и удалить заменённые локальные функции. Не копировать монолит РКБ, не менять его live и не начинать вторую checkpoint-машинерию. Эта последовательность сохраняет требование владельца о reuse и приближает первый продукт.

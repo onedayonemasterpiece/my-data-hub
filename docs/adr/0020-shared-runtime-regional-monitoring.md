@@ -1,3 +1,16 @@
+# ADR-0020: предложение Dev recovery journal отозвано для пилота
+
+- Статус: **withdrawn proposal**, 04.11.2026 после CHANGES_REQUIRED.
+- Предложение перенести exact payload journal из РКБ больше не является выбранным обязательным путём MDH.
+- Новая рекомендация: один notebook, PostgreSQL, logical dump и current/previous private Dataset; [исправленный план](../implementation/regional-novelty/implementation-plan.md).
+- Цена потери непокрытого хвоста требует решения владельца; его согласие не получено. [Точная граница](../implementation/regional-novelty/owner-decisions.md).
+- PostgreSQL/PGDATA и canonical business tables на Dev по-прежнему запрещены. Live РКБ не меняется. Исполняемые invariants этой правкой не ослаблены.
+
+Предыдущий текст сохранён ниже только как история предложения. Он не разрешает начинать перенос журнала и не является действующим исполнительским списком.
+
+<details>
+<summary>Предложение до аудита</summary>
+
 # ADR-0020: общий Kaggle runtime и журнал восстановления регионального мониторинга
 
 - Статус: проект инженерной реализации для аудита; прямые продуктовые решения владельца обязательны.
@@ -35,3 +48,5 @@ RKB Dataset-primary durability фактически использует bounded
 Shared runtime сохраняет wire compatibility при извлечении: RKB domain handlers остаются в адаптере. Продукт не вводит новый общий limiter, gateway, workflow engine, receipt DB или frontend. Документальный снимок shared code в MDH не импортируется приложением и не поддерживается как fork.
 
 Для принятия инженерного решения нужны различающие результаты W1/W2: два adapters одной dependency, lost-ACK reconciliation, kernel-loss exact replay, правильный Dataset Saved и согласованные size/time limits. Наличие начальных 16 unit tests не доказывает эти integration свойства. Подробные источники и проверки: [RKB evidence](../implementation/regional-novelty/rkb-storage-evidence.md), [маршрут аудита](../implementation/regional-novelty/OPUS-AUDIT.md).
+
+</details>

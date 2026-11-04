@@ -1,3 +1,5 @@
+> **Новая редакция после CHANGES_REQUIRED:** [ответ на аудит](../implementation/regional-novelty/AUDIT-RESPONSE.md) и [короткий исполнительский план](../implementation/regional-novelty/implementation-plan.md). Прежний обязательный framework и перенос Dev journal отозваны из пилота; цена snapshot-only ещё требует решения владельца.
+
 > **Продолжение от 04.11.2026:** владелец ответил на вопросы этого исследования и поручил начать реализацию. Актуальная точка входа — [пакет для аудита Opus](../implementation/regional-novelty/OPUS-AUDIT.md), [принятые решения](../implementation/regional-novelty/owner-decisions.md) и [проект реализации](../implementation/regional-novelty/implementation-plan.md). Вопросы раздела 11 ниже больше не являются открытыми. Точный разбор долговечности РКБ и реализованный первый shared-code slice находятся в новом пакете. Исходный отчёт далее сохранён без переписывания истории.
 
 ---

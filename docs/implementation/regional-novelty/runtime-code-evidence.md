@@ -1,3 +1,5 @@
+> **Исторический evidence-срез до CHANGES_REQUIRED.** Исходные факты и source snapshot сохранены; прежние proposals и переносы не являются обязательной архитектурой пилота. Текущие решения: [ответ на аудит](AUDIT-RESPONSE.md) и [исправленный план](implementation-plan.md). Live reuse и готовый продукт этим документом не подтверждаются.
+
 # kaggle-runtime: provenance and initial executable scope
 
 Date: 2026-11-04. This record covers local source under `implementation/kaggle-runtime`; it is not evidence of deployment or a successful Kaggle run.

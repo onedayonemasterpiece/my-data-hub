@@ -17,17 +17,20 @@ the exact imported source to make derived decisions appear consistent.
 
 ## Current owner-directed implementation
 
-For the regional novelty/shared runtime work, start with
-[`docs/implementation/regional-novelty/OPUS-AUDIT.md`](docs/implementation/regional-novelty/OPUS-AUDIT.md)
-and its owner decisions. The packet contains exact external-project evidence and a
-documentation-only shared source snapshot for auditors with access to this repo and
-RKB only. Use `onedayonemasterpiece/kaggle-runtime` as the executable upstream; do not
-turn the snapshot into another maintained fork.
+For regional novelty, start with
+[`docs/implementation/regional-novelty/OPUS-AUDIT.md`](docs/implementation/regional-novelty/OPUS-AUDIT.md).
+The 2026-11-04 implementation plan received CHANGES_REQUIRED; the revised plan puts
+one useful restored card before a shared framework. Use one notebook/lifecycle owner,
+ordinary PostgreSQL pending work, one model assessment and the official OpenCode
+installer at startup. Preserve existing MCP security and single-writer authority.
 
-The owner selected RKB-style durability and quota-driven fresh executors. ADR-0020
-records the engineering reconciliation for bounded exact recovery payload on Dev;
-it does not authorize canonical PostgreSQL/PGDATA on Dev or declare unimplemented
-runtime paths ready. Do not repeat resolved SQL/backup/product-priority questions.
+The Dev-journal transfer in ADR-0020 is withdrawn for the pilot. Snapshot-only storage
+is a proposal with an explicitly unresolved owner decision about loss of the tail
+since the last Dataset snapshot. Do not infer owner acceptance from a forwarded audit.
+Do not add another checkpoint owner, release service or mandatory two-consumer rollout.
+The initial kaggle-runtime source snapshot is historical evidence; the package is not
+a prerequisite for the first useful card. Extract common code when an actual second
+consumer needs it, and preserve the owner's cross-project reuse requirement.
 
 ## Hard invariants
 

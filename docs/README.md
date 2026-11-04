@@ -1,12 +1,12 @@
 # Documentation index
 
-## Current implementation: regional novelty and shared Kaggle runtime
+## Current implementation: revised after CHANGES_REQUIRED
 
-- **[Start the Opus audit here](implementation/regional-novelty/OPUS-AUDIT.md)** — self-contained reading route for an auditor with access only to My Data Hub and RKB; includes the full shared source snapshot and evidence from other private projects.
-- [Owner decisions, 2026-11-04](implementation/regional-novelty/owner-decisions.md) — significant regional novelty first, free-quota stop/fresh execution, RKB Dataset durability and no external backup platform.
-- [Implementation project](implementation/regional-novelty/implementation-plan.md) and [concrete product modules/API/migrations](implementation/regional-novelty/novelty-implementation.md).
-- [Proposed ADR-0020](adr/0020-shared-runtime-regional-monitoring.md) — bounded noncanonical recovery journal while preserving the single Kaggle PostgreSQL authority.
-- Shared upstream: [kaggle-runtime](https://github.com/onedayonemasterpiece/kaggle-runtime). The initial pure-code slice is committed and locally tested; provider/WSS integration and a live novelty product remain implementation work.
+- **[Current audit and implementation route](implementation/regional-novelty/OPUS-AUDIT.md)** — first useful regional-novelty card and one real PostgreSQL/Dataset/MCP cycle.
+- [Audit response](implementation/regional-novelty/AUDIT-RESPONSE.md), [received summary](implementation/regional-novelty/OPUS-AUDIT-SUMMARY.md), [owner decisions and unresolved crash-loss boundary](implementation/regional-novelty/owner-decisions.md).
+- [Revised implementation plan](implementation/regional-novelty/implementation-plan.md) and [minimal product slice](implementation/regional-novelty/novelty-implementation.md).
+- [ADR-0020 is withdrawn for the pilot](adr/0020-shared-runtime-regional-monitoring.md). A second checkpoint system and Dev journal are not mandatory implementation tasks.
+- [kaggle-runtime](https://github.com/onedayonemasterpiece/kaggle-runtime) is an initial unadopted package. Further extraction follows actual shared use; it does not precede the first product.
 
 ## Authority and product
 
