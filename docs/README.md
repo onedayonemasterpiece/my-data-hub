@@ -1,12 +1,13 @@
 # Documentation index
 
-## Current implementation: revised after CHANGES_REQUIRED
+## Current implementation: accepted physical base + WAL
 
-- **[Current audit and implementation route](implementation/regional-novelty/OPUS-AUDIT.md)** — first useful regional-novelty card and one real PostgreSQL/Dataset/MCP cycle.
-- [Audit response](implementation/regional-novelty/AUDIT-RESPONSE.md), [received summary](implementation/regional-novelty/OPUS-AUDIT-SUMMARY.md), [owner decisions and unresolved crash-loss boundary](implementation/regional-novelty/owner-decisions.md).
-- [Revised implementation plan](implementation/regional-novelty/implementation-plan.md) and [minimal product slice](implementation/regional-novelty/novelty-implementation.md).
-- [ADR-0020 is withdrawn for the pilot](adr/0020-shared-runtime-regional-monitoring.md). A second checkpoint system and Dev journal are not mandatory implementation tasks.
-- [kaggle-runtime](https://github.com/onedayonemasterpiece/kaggle-runtime) is an initial unadopted package. Further extraction follows actual shared use; it does not precede the first product.
+- **[Audit and implementation route](implementation/regional-novelty/OPUS-AUDIT.md)** — self-contained entry point for the MDH/РКБ reviewer.
+- [Owner decisions](implementation/regional-novelty/owner-decisions.md) and [physical base + WAL](implementation/regional-novelty/STORAGE-BASE-WAL.md) — accepted storage, long sessions, one publisher; no separate pilot scheme.
+- [Live preflight results](implementation/regional-novelty/STORAGE-PREFLIGHT-RESULT.md) — measured P1/P2, CPU observations, remaining P3/P4 limitations.
+- [Implementation plan](implementation/regional-novelty/implementation-plan.md) and [product slice](implementation/regional-novelty/novelty-implementation.md).
+- [Historical audit response](implementation/regional-novelty/AUDIT-RESPONSE.md), [forwarded summary](implementation/regional-novelty/OPUS-AUDIT-SUMMARY.md), [withdrawn Dev-journal ADR-0020](adr/0020-shared-runtime-regional-monitoring.md).
+- [kaggle-runtime](https://github.com/onedayonemasterpiece/kaggle-runtime) remains an initial unadopted package; further extraction follows actual shared use.
 
 ## Authority and product
 

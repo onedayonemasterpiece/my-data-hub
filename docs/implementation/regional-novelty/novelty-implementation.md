@@ -6,7 +6,7 @@
 
 Один notebook выполняет capture и последовательный processing loop рядом с единственной PostgreSQL. Полный исходник сохраняется прежде модели. Модель оценивает один новый post revision одним запросом; готовый structured result хранится целиком. PG unique constraints обеспечивают дедупликацию, обычный SELECT выбирает необработанное. Stage orchestration, второй result store и generic connector refactor для этого не требуются.
 
-Предлагается одна следующая contiguous migration `sql/migrations/0023_regional_monitoring_pilot.sql` (номер перепроверить перед реализацией). Предметные таблицы находятся в той же canonical PG; они не дублируются на Dev.
+Предлагается одна следующая contiguous migration `sql/migrations/0023_regional_monitoring.sql` (номер перепроверить перед реализацией). Предметные таблицы находятся в той же canonical PG; они не дублируются на Dev.
 
 | Объект | Минимальные данные и назначение |
 |---|---|
@@ -37,8 +37,8 @@ Post revision — canonical representation этого workload. Existing content
 
 | Owned scope | Действие |
 |---|---|
-| Existing `master_runtime/notebook_entrypoint.py`, `bootstrap.py`, `postgres.py` | Сократить один normal lifecycle, правильно выполнить logical restore после PG start |
-| Existing `checkpoints/kaggle_runtime.py`, `publisher.py`, `control_plane/runtime.py` | Один snapshot owner и current/previous references; убрать второй broker/verifier path из обычного цикла |
+| Existing `master_runtime/notebook_entrypoint.py`, `bootstrap.py`, `postgres.py` | Один normal lifecycle: физическая база и WAL восстанавливаются до PG start; запись после завершения recovery |
+| Existing `checkpoints/kaggle_runtime.py`, `publisher.py`, `control_plane/runtime.py` | Один publisher основной базы и временного WAL, current/previous references; сохранить streaming upload, снять обязательный verifier/acceptance |
 | Proposed `workloads/regional_monitoring/capture.py` | Один разрешённый источник, typed post input и атомарный cursor |
 | Proposed `workloads/regional_monitoring/process.py` | SELECT pending → одна модель → сохранить полный JSON result; без новой очереди |
 | Proposed `workloads/regional_monitoring/reader.py` | Предметные запросы списка/карточки/coverage |
@@ -50,10 +50,10 @@ Post revision — canonical representation этого workload. Existing content
 
 `novelty.list(region, period)` возвращает значимое новое, объяснение, время и источник. `novelty.get(id)` показывает полную карточку, source/prior evidence и уточнения. Статус корпуса отдельно показывает, какие источники/период собраны и какая часть ещё не проанализирована. Существующий MCP wake/resolve обеспечивает доступ к notebook; frontend и новый gateway не требуются.
 
-Сохранённая в текущей PG карточка и карточка, вошедшая в подтверждённый Dataset, различаются по долговечности. Если принят snapshot-only contract, при аварии ещё не покрытая карточка может исчезнуть до повторной обработки. Продукт не обещает прежнюю сохранность каждого COMMIT; решение владельца о допустимом хвосте зафиксировано как открытое в owner-decisions.md.
+Карточка сохраняется в PostgreSQL транзакционно. Аварийная долговечность определяется опубликованными base/WAL версиями; статус показывает свежесть внешнего сохранения. Выбор владельца закрыт [физической базой + WAL](STORAGE-BASE-WAL.md), без Dev journal и отдельной пилотной схемы. Неопубликованные транзакции ещё могут потеряться; локальный COMMIT не называется внешним сохранением.
 
 ## Приёмка
 
-Один реальный источник → сохранённый полный post → один model result → карточка через MCP → Dataset save → подтверждённый STOP → свежий notebook → та же revision и тот же результат через MCP. Повтор capture не создаёт дубль. Уже сохранённый в Dataset ответ не вызывает модель снова.
+Один реальный источник → полный post → один model result → карточка через MCP → её WAL опубликован → notebook убит без STOP → свежий notebook восстанавливает base + WAL → та же revision и тот же ответ через MCP без повторного inference. Затем штатный STOP создаёт одну базовую версию, после ready удаляет старый временный Dataset, а следующий старт читает ту же карточку. Повтор capture не создаёт дубль.
 
-Отдельные короткие различающие проверки нужны только для изменённых границ: correction создаёт revision; репост не создаёт независимое подтверждение; ошибка модели не равна «нового нет»; logical restore действительно идёт после запуска PG. Полная прежняя acceptance fleet и объём 100 ГБ не становятся условиями первой карточки.
+Три различающих реальных PostgreSQL-сценария определены в STORAGE-BASE-WAL. Предметные проверки ограничены изменёнными границами: correction создаёт revision; репост не становится независимым подтверждением; ошибка модели не равна «нового нет». Одна карточка не доказывает ёмкость 100 ГБ — это отдельная измеряемая часть принятой рабочей схемы П3, а не будущая замена хранения.

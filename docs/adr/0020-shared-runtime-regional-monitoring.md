@@ -1,12 +1,10 @@
-# ADR-0020: предложение Dev recovery journal отозвано для пилота
+# ADR-0020: предложение Dev recovery journal отозвано
 
-- Статус: **withdrawn proposal**, 04.11.2026 после CHANGES_REQUIRED.
-- Предложение перенести exact payload journal из РКБ больше не является выбранным обязательным путём MDH.
-- Новая рекомендация: один notebook, PostgreSQL, logical dump и current/previous private Dataset; [исправленный план](../implementation/regional-novelty/implementation-plan.md).
-- Цена потери непокрытого хвоста требует решения владельца; его согласие не получено. [Точная граница](../implementation/regional-novelty/owner-decisions.md).
-- PostgreSQL/PGDATA и canonical business tables на Dev по-прежнему запрещены. Live РКБ не меняется. Исполняемые invariants этой правкой не ослаблены.
+- Статус: withdrawn proposal; решение владельца от 04.11.2026 — [физическая база + native WAL](../implementation/regional-novelty/STORAGE-BASE-WAL.md).
+- Один notebook, один publisher двух private Dataset. Snapshot-only/logical dump и открытый вопрос о потере хвоста заменены [принятым решением](../implementation/regional-novelty/owner-decisions.md), без отдельного пилотного хранения.
+- PostgreSQL/PGDATA, WAL и canonical business tables на Dev запрещены. Live РКБ не меняется; исполняемые invariants не ослаблены.
 
-Предыдущий текст сохранён ниже только как история предложения. Он не разрешает начинать перенос журнала и не является действующим исполнительским списком.
+Предыдущий текст ниже — только история предложения. Он не разрешает перенос собственного журнала и не является исполнительским списком.
 
 <details>
 <summary>Предложение до аудита</summary>

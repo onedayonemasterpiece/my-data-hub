@@ -33,22 +33,31 @@ exhaustion, current OpenCode, private Dataset persistence, an active DB target b
 100 GB and no external backup platform in this delivery. SQL and migrations are
 engineering responsibilities.
 
-The [revised plan](implementation/regional-novelty/implementation-plan.md) starts with
-one real PostgreSQL/Dataset/MCP lifecycle and a useful card. The earlier mandatory
-Dev journal, independent executor topology, release framework and two-consumer gate
-were author design choices and have been withdrawn from the pilot. ADR-0020 is a
-withdrawn proposal, not authority to add replay payload storage on Dev.
+The [implementation plan](implementation/regional-novelty/implementation-plan.md)
+uses one real PostgreSQL/Dataset/MCP lifecycle and one useful card. The mandatory
+Dev journal, independent executors, release framework and two-consumer gate were
+author choices and are withdrawn. ADR-0020 does not authorize a Dev data journal.
 
-Snapshot-only storage is recommended but changes the crash guarantee: work after
-the latest verified Dataset may require refetch/reanalysis and may not be reproducible.
-The owner has not accepted that loss boundary yet. Neither the forwarded audit nor
-this documentation silently changes the guarantee. Independent source/lifecycle work
-can proceed while this product decision remains explicit.
+The owner has accepted [physical base + native WAL](implementation/regional-novelty/STORAGE-BASE-WAL.md):
+one main private Dataset version at planned stop, a temporary Dataset for the complete
+required WAL tail, physical restore before PG start, and one publisher for both.
+Snapshot-only, logical pg_restore and the unresolved tail-loss question are superseded.
+Use long Kaggle sessions and design for the ~100 GB target without a separate pilot
+storage path. The current base reference and its ready WAL bound recoverability;
+an online candidate becomes current only after its base and needed tail are ready. Upload and
+processing delays prevent treating 15–20 minutes as an unconditional guarantee.
 
-The [audit route](implementation/regional-novelty/OPUS-AUDIT.md) contains the received
-summary, response and current proposal. The full uncommitted worktree audit was not
-read in this preparation. The shared repository exists; its initial primitives are
-not live provider/WSS adoption and are not prerequisites for the first product.
+The [preflight results](implementation/regional-novelty/STORAGE-PREFLIGHT-RESULT.md)
+distinguish measured Dataset replacement/deletion and a fresh CPU runtime from
+the remaining capacity/quota checks and product recovery. Large-transfer results are
+recorded separately in that protocol. Existing PostgreSQL 18.4 /
+pgvector 0.8.6 is retained. Neither documentation integration nor disposable probes
+are proof that the MDH master or a regional card works.
+
+The [audit route](implementation/regional-novelty/OPUS-AUDIT.md) links current decisions,
+implementation and preserved history. The full uncommitted audit was not obtained;
+only its forwarded summary was preserved. The shared package is not a prerequisite
+for the first product; actual repeated provider/transport code remains a reuse target.
 
 ## Canonical boundaries
 

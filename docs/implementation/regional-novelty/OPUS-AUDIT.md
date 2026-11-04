@@ -1,43 +1,42 @@
-# My Data Hub: текущий проект после CHANGES_REQUIRED
+# My Data Hub: аудит принятой схемы и реализации
 
-Редакция 04.11.2026 после пересланного аудита. Прежний план на commit `6b7a68044d9a6cca002c916158b8cbfa8ee1ea6b` получил **CHANGES_REQUIRED** и заменён. Вердикт по новой редакции ещё не получен.
+Решение владельца от 04.11.2026: **физическая базовая копия + штатный WAL во временном Dataset**, один publisher и длинные сессии Kaggle. Исходная ветка docs/storage-wal-scheme-20261104 включена в main на bcd7acfb. Вердикт CHANGES_REQUIRED относился к прежнему проекту; новая реализация не объявляется принятой по факту обновления документов.
 
-**Цель:** первая карточка значимого нового из реальной публикации, прочитанная через MCP и сохранившаяся после Dataset save, остановки и запуска нового notebook. Общий framework не является предварительным этапом.
+**Продуктовая приёмка:** реальная карточка → её WAL опубликован → внезапное исчезновение notebook → новый notebook → та же карточка через MCP без нового inference. Затем STOP → одна готовая основная версия → временный Dataset удалён.
 
 ## Читать в этом порядке
 
-| Документ | Назначение |
+| Документ | Что он устанавливает |
 |---|---|
-| [Ответ на аудит](AUDIT-RESPONSE.md) | Принятые находки, фактические уточнения, отозванные решения и два вопроса review |
-| [Решения владельца](owner-decisions.md) | Обязательный продукт и единственная новая граница: потеря хвоста после последнего снимка ещё не согласована |
-| [Исправленный план](implementation-plan.md) | Один notebook, один lifecycle/checkpoint owner, первый реальный цикл и последующая карточка |
-| [Первый продуктовый срез](novelty-implementation.md) | Полные revisions, SQL pending, один model call и предметный MCP |
-| [Полученное резюме аудита](OPUS-AUDIT-SUMMARY.md) | Текст, пересланный владельцем; полный worktree report не выдан за прочитанный |
+| [Решения владельца](owner-decisions.md) | Выбор хранения закрыт; ~100 ГБ учитываются сразу, snapshot-only и Dev journal отменены |
+| [Физическая база + WAL](STORAGE-BASE-WAL.md) | Формат, restore/stop, timeline, рост хвоста, один publisher, три реальных теста |
+| [Живые проверки П1–П4](STORAGE-PREFLIGHT-RESULT.md) | Что уже измерено, точные ресурсы/receipt, ограничения передачи и ёмкости |
+| [План реализации](implementation-plan.md) | Один notebook, существующий lifecycle, конкретные изменения, аварийная и штатная приёмка |
+| [Предметная реализация](novelty-implementation.md) | Полные revisions, SQL pending, один вызов модели, MCP карточка |
+| [Исторический ответ](AUDIT-RESPONSE.md), [полученное резюме](OPUS-AUDIT-SUMMARY.md) | Происхождение CHANGES_REQUIRED и последующих решений; не текущая storage-спецификация |
 
-Предложение текущей редакции: один notebook с PostgreSQL/OpenCode; SQL выбирает необработанные revisions; официальный OpenCode installer выполняется при старте; logical dump в Dataset сохраняется перед остановкой; следующий notebook восстанавливает snapshot и продолжает работу. Без Dev journal, отдельной stage orchestration, собственного release service и обязательного adoption двух consumers перед первой карточкой.
+OpenCode устанавливается актуальным официальным installer на каждом старте; отдельный release service не нужен. Общая библиотека не откладывает карточку: переиспользуется работающий provider/transport MDH, а совпавший код выделяется при реальном втором потребителе. Исходники runtime этой интеграцией документов не изменены; master при проверке был ABSENT.
 
-**Решение о snapshot-only пока proposed.** Оно сохраняет последний подтверждённый Dataset; при внезапной потере текущего notebook непокрытый хвост может потеряться и потребовать повторного сбора/анализа. Публичность источника не гарантирует восстановление прежнего текста/ответа. Исправленный план не заявляет согласия владельца с этой ценой.
+## Исходники, достаточные для глубокого review
 
-## Источники для углубления
+Opus достаточно доступа к MDH и РКБ. В MDH смотреть master_runtime/postgres.py (генерация archive/recovery и ready), bootstrap.py (physical restore до PG), notebook_entrypoint.py (cold base после fast-stop), checkpoints/archive.py и manifest.py (убрать второй logical dump согласованно со всеми readers), provider_storage.py/brokered_upload.py (сохранить streaming transport), publisher.py/kaggle_runtime.py и control_plane/runtime.py (единственный owner). Пути относятся к src/my_data_hub; детали и exact исходный SHA приведены в протоколе проверок.
 
-Opus по-прежнему достаточно доступа к MDH и РКБ. Сведения из других репозиториев сохранены здесь; обращаться к ним для основного чтения необязательно.
+- [Хранение РКБ](rkb-storage-evidence.md) — фиксированный срез; не требование перенести его Dev journal.
+- [Другие проекты](cross-project-evidence.md) — сохранённые сведения о EventsBot/DAEP и возможностях reuse.
+- [Начальный общий код](shared-runtime-source.md), [границы проверки](runtime-code-evidence.md) — исторический source snapshot 52644f2, без доказанного adoption.
+- [Отозванный ADR-0020](../../adr/0020-shared-runtime-regional-monitoring.md).
+- [Первоначальное исследование](../../architecture/regional-monitoring-shared-kaggle-runtime-20261104.md).
+- [Аудит упрощения РКБ A2–A4](https://github.com/onedayonemasterpiece/regional-knowledge-base/blob/2cfb2bbf6c95d1ef4efaf5f7871b5e3d559921f5/docs/audits/rkb-complexity-audit-2-20261023.md).
 
-- [Существующий сложный storage РКБ](rkb-storage-evidence.md) — фиксированный срез кода; не требование переносить его в пилот.
-- [Контракты других проектов](cross-project-evidence.md) — provenance и возможности последующего reuse; не prerequisites первой карточки.
-- [Начальный общий код и тесты](shared-runtime-source.md), [пределы проверки](runtime-code-evidence.md) — исторический snapshot source commit `52644f2748b602f54304e56424eee720d12a691b`, без consumers/live adoption.
-- [Отозванное предложение ADR-0020](../../adr/0020-shared-runtime-regional-monitoring.md) — почему Dev journal больше не является выбранным переносом.
-- [Первоначальное исследование](../../architecture/regional-monitoring-shared-kaggle-runtime-20261104.md) — широкий продуктовый контекст.
-- [Аудит упрощения РКБ, A2–A4](https://github.com/onedayonemasterpiece/regional-knowledge-base/blob/2cfb2bbf6c95d1ef4efaf5f7871b5e3d559921f5/docs/audits/rkb-complexity-audit-2-20261023.md).
+Authority: [AGENTS](../../../AGENTS.md), [source of truth](../../00-source-of-truth.md), [invariants](../../../architecture/invariants.yaml), [ADR-0016](../../adr/0016-kaggle-postgresql-master-architecture-reset.md). Exact imported source и исполняемые invariants не менялись. Полный OPUS-AUDIT-RESULT из чужого worktree не получен; сохранено честно обозначенное пересланное резюме.
 
-Authority: [AGENTS](../../../AGENTS.md), [source of truth](../../00-source-of-truth.md), [invariants](../../../architecture/invariants.yaml), [ADR-0016](../../adr/0016-kaggle-postgresql-master-architecture-reset.md). Exact imported source не менялся. Runtime source этой редакцией не изменён; platform.status при подготовке показывал ABSENT, а не доказанную готовность.
+## Вопросы следующего review
 
-## Проверить в следующем review
+1. Выполняются ли измерения до storage-кода без второго credentialed publisher или обхода provider authority?
+2. Сохраняется ли один lifecycle и stream upload при удалении обязательных verifier/acceptance ветвей?
+3. Восстанавливаются ли полный PGDATA, подходящий base_id, WAL и timeline history до первой записи; не теряются ли прежние данные?
+4. Сохраняется ли WAL за время online публикации; остаётся ли current reference на прежней паре до готовности новой базы с её WAL; удаляется ли старый хвост только после переключения?
+5. Учтены ли фактические пределы /kaggle/working, scratch, Dataset и upload для целевых ~100 ГБ?
+6. Возвращает ли одна модель полезную карточку с источниками, а ошибки остаются отличимы от «нового нет»?
 
-1. Есть ли ровно один normal lifecycle/checkpoint owner, и удалены ли из его вызовов прежние обязательные broker/verifier/acceptance зависимости?
-2. Правильно ли logical restore выполняется после PG start и не теряется ли существующий physical checkpoint при миграции?
-3. Достаточна ли SQL identity публикации и cursor для повторного capture без дублей?
-4. Возвращает ли одна модель полезную карточку с настоящим source/prior evidence, а ошибки остаются отличимы от «нового нет»?
-5. Появляется ли первая карточка до разработки универсального runtime, BGE fleet и 100-ГБ профиля?
-6. Ясна ли владельцу новая durability-граница, и не приписано ли согласие на неё?
-
-Приёмка реализации: реальный пост → карточка → save → stop → новый notebook → та же карточка через штатный MCP. Документация и прежние 16 unit tests этого результата не подтверждают.
+Документация, микропробы Kaggle и прежние unit tests не доказывают восстановление карточки. Результаты реальной PostgreSQL/карточной приёмки должны быть приложены после реализации; согласие владельца со схемой уже получено.

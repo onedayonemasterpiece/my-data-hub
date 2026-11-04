@@ -1,0 +1,659 @@
+{
+  "scope": "Owner-approved BASE+WAL storage preflight; synthetic resources only; no production storage code or MDH master launch",
+  "owner_source_commit": "bcd7acfb6d0cbe635a90528dc30ed1f22c2f2ae2",
+  "source_runtime_examined": "8a0ec2014e12d62600ee830c6b9fd0d1bd0c234d",
+  "provider_deployed_commit": "f7eb3c5f674b772751c815aa055a52f1f52e1828",
+  "dataset": {
+    "ids": {
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "create_effect": "b1c15e7f-2b24-4f02-8fa8-56dc3ff536f5",
+      "version_effect": "245e2ac6-47f7-4ac3-8558-bf74dfb93e23",
+      "delete_effect": "5a563d65-8976-4bd8-8b7f-39f0e97015e8",
+      "slug": "mdh-base-wal-probe-20261104-6da37c"
+    },
+    "create": {
+      "operation_id": "856958d0-5ef8-54c2-ac9b-496d796c93ef",
+      "effect_id": "b1c15e7f-2b24-4f02-8fa8-56dc3ff536f5",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 1,
+      "package_sha256": "862337b842c32b28a0ead749122ef5320c972b11ceda45e4453d6712fb6109cb",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "563ba0f79a52cf71b90b7a0e6f77fff8514a4adcc239ded371b55e33d4180a04"
+      },
+      "claim_sha256": "68870fc695d64be196972242b2ae3c4aa2ce09ff38cf50392a632c6969ce9662",
+      "outcome": "applied",
+      "attempts": 1
+    },
+    "v1_read": {
+      "claim_sha256": "68870fc695d64be196972242b2ae3c4aa2ce09ff38cf50392a632c6969ce9662",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 1,
+      "package_sha256": "862337b842c32b28a0ead749122ef5320c972b11ceda45e4453d6712fb6109cb",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "563ba0f79a52cf71b90b7a0e6f77fff8514a4adcc239ded371b55e33d4180a04"
+      },
+      "private": true
+    },
+    "v1_list": {
+      "contract_version": "my-data-hub-mcp-dataset-batch.v1",
+      "claim_sha256": "68870fc695d64be196972242b2ae3c4aa2ce09ff38cf50392a632c6969ce9662",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 1,
+      "package_sha256": "862337b842c32b28a0ead749122ef5320c972b11ceda45e4453d6712fb6109cb",
+      "files": [
+        {
+          "path": "segment-a.txt",
+          "byte_size": 81,
+          "sha256": "516ee534012c6b65fbdec92ffae7bf7f36202d2152f6affde2cf358aa07f1905"
+        }
+      ],
+      "file_count": 1,
+      "cursor": 0,
+      "next_cursor": null,
+      "complete": true,
+      "bounded": true
+    },
+    "version": {
+      "operation_id": "4ed3577e-07ed-5de1-85b4-a9bf2e208c66",
+      "effect_id": "245e2ac6-47f7-4ac3-8558-bf74dfb93e23",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 2,
+      "package_sha256": "0cb9f674d2e8fb39267b1204447da0bb9bcb7c3e1707c4ccfef177aee58cab9f",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "772861c2cd5b8c2584df0cebbf2bc5bf07f20c77856a5af000709fd819172acd"
+      },
+      "claim_sha256": "4c5df9406739191162353c714f82aa6980d7c171eba9fb1cba3d7f167abbce88",
+      "outcome": "applied",
+      "attempts": 1
+    },
+    "v2_read": {
+      "claim_sha256": "4c5df9406739191162353c714f82aa6980d7c171eba9fb1cba3d7f167abbce88",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 2,
+      "package_sha256": "0cb9f674d2e8fb39267b1204447da0bb9bcb7c3e1707c4ccfef177aee58cab9f",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "772861c2cd5b8c2584df0cebbf2bc5bf07f20c77856a5af000709fd819172acd"
+      },
+      "private": true
+    },
+    "v2_list": {
+      "contract_version": "my-data-hub-mcp-dataset-batch.v1",
+      "claim_sha256": "4c5df9406739191162353c714f82aa6980d7c171eba9fb1cba3d7f167abbce88",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "provider_version": 2,
+      "package_sha256": "0cb9f674d2e8fb39267b1204447da0bb9bcb7c3e1707c4ccfef177aee58cab9f",
+      "files": [
+        {
+          "path": "segment-b.txt",
+          "byte_size": 80,
+          "sha256": "5af7c8dc2307ee2f116d86b5e2371fbef35e9e350ca23e2ea9eb81bac7f72dd8"
+        }
+      ],
+      "file_count": 1,
+      "cursor": 0,
+      "next_cursor": null,
+      "complete": true,
+      "bounded": true
+    },
+    "delete": {
+      "operation_id": "249bf2a4-16bd-5627-a7bc-ba5a90857d4f",
+      "effect_id": "5a563d65-8976-4bd8-8b7f-39f0e97015e8",
+      "task_id": "6083e5f6-bb4a-46e1-8b50-27cebac72e1d",
+      "provider_ref": "zigomaro/mdh-base-wal-probe-20261104-6da37c",
+      "claim_sha256": "4c5df9406739191162353c714f82aa6980d7c171eba9fb1cba3d7f167abbce88",
+      "action": "delete_dataset",
+      "outcome": "applied",
+      "attempts": 1
+    },
+    "after_inventory": {
+      "complete": true,
+      "probe_present": false
+    },
+    "timings_ms": {
+      "create": 15741,
+      "version": 10931,
+      "delete": 4088
+    }
+  },
+  "cpu": {
+    "run": {
+      "operation_id": "2f595c42-6d6f-599f-ba7f-3870b4ee2c09",
+      "effect_id": "29632610-300f-4f3c-b559-b1eb922e37cb",
+      "task_id": "8f426120-abbb-4d26-ab12-8c4a8df27a82",
+      "task_run_id": "82b329d3-bc56-43f6-9622-43b57c7cc343",
+      "provider_ref": "zigomaro/mdh-wal-capacity-20261104-3d57ae",
+      "provider_run_ref": "zigomaro/mdh-wal-capacity-20261104-3d57ae/1",
+      "provider_kernel_id": 142774470,
+      "source_version": 1,
+      "source_sha256": "1837a512260053a124cd1db4141777e00ba7e93adde2656d09f7f5c9bab4a15d",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "884da74dedb9aa89e5317f2eefc30dd73e5e42de45afc0c865b2ee1a4158b7ba"
+      },
+      "claim_sha256": "c646f51d75e716fac31af9716835b8108f74fe9b69b6ed0cef65dfdfa9e33902",
+      "outcome": "applied",
+      "attempts": 1,
+      "runtime_options": {
+        "enable_internet": false,
+        "accelerator": "none"
+      },
+      "expected_outputs": [
+        {
+          "path": "capacity-probe.json",
+          "max_bytes": 16384,
+          "media_type": "application/json"
+        }
+      ]
+    },
+    "status": {
+      "claim_sha256": "c646f51d75e716fac31af9716835b8108f74fe9b69b6ed0cef65dfdfa9e33902",
+      "task_id": "8f426120-abbb-4d26-ab12-8c4a8df27a82",
+      "task_run_id": "82b329d3-bc56-43f6-9622-43b57c7cc343",
+      "provider_ref": "zigomaro/mdh-wal-capacity-20261104-3d57ae",
+      "provider_run_ref": "zigomaro/mdh-wal-capacity-20261104-3d57ae/1",
+      "provider_kernel_id": 142774470,
+      "source_version": 1,
+      "source_sha256": "1837a512260053a124cd1db4141777e00ba7e93adde2656d09f7f5c9bab4a15d",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "884da74dedb9aa89e5317f2eefc30dd73e5e42de45afc0c865b2ee1a4158b7ba"
+      },
+      "private": true,
+      "run_state": "complete",
+      "provider_status": "complete",
+      "failure_message": null,
+      "terminal": true,
+      "status_observed_at": "2026-11-04T22:06:07.386023+00:00",
+      "runtime_options": {
+        "accelerator": "none",
+        "enable_internet": false
+      },
+      "expected_outputs": [
+        {
+          "max_bytes": 16384,
+          "media_type": "application/json",
+          "path": "capacity-probe.json"
+        }
+      ]
+    },
+    "measurement": {
+      "task_run_id": "82b329d3-bc56-43f6-9622-43b57c7cc343",
+      "started_at_unix": 1793829916.3689835,
+      "finished_at_unix": 1793829916.3710375,
+      "python": "3.13.18",
+      "architecture": "x86_64",
+      "cpu_count": 4,
+      "memory": {
+        "MemTotal_bytes": 33658159104,
+        "MemAvailable_bytes": 32687251456
+      },
+      "filesystems": [
+        {
+          "path": "/kaggle/working",
+          "device": 1794,
+          "total_bytes": 20957446144,
+          "available_bytes": 20940562432
+        },
+        {
+          "path": "/tmp",
+          "device": 53,
+          "total_bytes": 8758385086464,
+          "available_bytes": 1038219055104
+        }
+      ],
+      "measurement_scope": "Fresh disposable CPU session; statvfs is capacity visibility, not a 100 GB write test or session-duration measurement. No Dataset uploads performed."
+    },
+    "delete": {
+      "operation_id": "8c1270e4-59dd-5213-ba1d-7f3ce4ea9ef6",
+      "effect_id": "17fc6782-26fa-40b6-bc9d-43f58394ead3",
+      "task_id": "8f426120-abbb-4d26-ab12-8c4a8df27a82",
+      "provider_ref": "zigomaro/mdh-wal-capacity-20261104-3d57ae",
+      "claim_sha256": "c646f51d75e716fac31af9716835b8108f74fe9b69b6ed0cef65dfdfa9e33902",
+      "action": "delete_notebook",
+      "outcome": "applied",
+      "attempts": 1
+    }
+  },
+  "large_publication_measurements": {
+    "100000000": {
+      "version": 1,
+      "planned_bytes": 100000000,
+      "producer_run": {
+        "task_run_id": "7bbc4c77-cfbf-5c9c-8b81-b620c2913e44",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+        "source_version": 1,
+        "source_sha256": "f87ce8f500b687626c718777cf1611236a70f7b7e707666afab07e601a490a00",
+        "provider_kernel_id": 142776272,
+        "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v1/1",
+        "started_at": "2026-11-04T22:25:17.153779Z"
+      },
+      "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+      "task_run_id": "7bbc4c77-cfbf-5c9c-8b81-b620c2913e44",
+      "actual_bytes": 100000000,
+      "file_sha256": "314544f9fbcdaf6760527b6a871c79793b32754c8cba60f912140fa118fba6b8",
+      "credential_free": true,
+      "generation_seconds": 0.843980208000005,
+      "upload_started_at": "2026-11-04T22:25:22.442866+00:00",
+      "upload_seconds": 3.6987744130000237,
+      "http_status": 200,
+      "expected_files": [
+        [
+          "p3-payload.blob",
+          100000000,
+          "{\"epoch\":1,\"file_sha256\":\"314544f9fbcdaf6760527b6a871c79793b32754c8cba60f912140fa118fba6b8\",\"manifest_sha256\":\"c4cbcf33b7f97defc739c9834695f808a7ae1d21e4bed7b9caf4f55ff575e2bb\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v1/1\",\"operation_id\":\"b20c7114-9e40-5a44-8557-67547a366ccf\",\"total_bytes\":100000000}"
+        ]
+      ],
+      "finalize_started_at": "2026-11-04T22:25:50.953008+00:00",
+      "finalizer_call_seconds": 13.865632089989958,
+      "finalizer_returned_at": "2026-11-04T22:26:04.821550+00:00",
+      "finalizer_ambiguous": false,
+      "dataset_status": {
+        "status": "ready",
+        "current_version_number": 1
+      },
+      "ready_at": "2026-11-04T22:26:05.059560+00:00",
+      "ready_after_finalize_seconds": 14.103678868996212,
+      "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/1",
+      "synthetic_creation_readback_started_at": "2026-11-04T22:26:05.066927+00:00",
+      "diagnostic_readback_observed_at": "2026-11-04T22:28:49.890071+00:00",
+      "diagnostic_readback_identity_path": "/home/dev/artifacts/my-data-hub/20261104T222445Z-storage-wal-preflight-20261104-5b1a3527/creation-identity.json",
+      "synthetic_creation_readback_seconds": null,
+      "upload_start_to_ready_seconds": 42.616694
+    },
+    "1000000000": {
+      "version": 2,
+      "planned_bytes": 1000000000,
+      "producer_run": {
+        "task_run_id": "0ca6a89d-2e14-53a5-b795-e10d205a6b63",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v2",
+        "source_version": 1,
+        "source_sha256": "7078800ae719ac209b46a6feced59f1aae62abd1213a1b8e21061bc19fd031ab",
+        "provider_kernel_id": 142777047,
+        "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v2/1",
+        "started_at": "2026-11-04T22:34:18.011025Z"
+      },
+      "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+      "task_run_id": "0ca6a89d-2e14-53a5-b795-e10d205a6b63",
+      "actual_bytes": 1000000000,
+      "file_sha256": "13ee442e77586b2c286e2488a0bd44f0d6bdb0369d17af3e93ba20a9ce5a78be",
+      "credential_free": true,
+      "generation_seconds": 9.364024230999973,
+      "upload_started_at": "2026-11-04T22:34:30.891877+00:00",
+      "upload_seconds": 10.33435259600003,
+      "http_status": 200,
+      "expected_files": [
+        [
+          "p3-payload.blob",
+          1000000000,
+          "{\"epoch\":1,\"file_sha256\":\"13ee442e77586b2c286e2488a0bd44f0d6bdb0369d17af3e93ba20a9ce5a78be\",\"manifest_sha256\":\"6f401332ef1a69f3949c5caafc3faa84a7fcad413fd3d173339ca276f9a85aaa\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v2/1\",\"operation_id\":\"f3f3875a-be25-528e-bc0e-ba30652108a3\",\"total_bytes\":1000000000}"
+        ]
+      ],
+      "finalize_started_at": "2026-11-04T22:35:05.739745+00:00",
+      "finalizer_call_seconds": 17.724196341994684,
+      "finalizer_returned_at": "2026-11-04T22:35:23.465360+00:00",
+      "finalizer_ambiguous": false,
+      "dataset_status": {
+        "status": "ready",
+        "current_version_number": 2
+      },
+      "ready_at": "2026-11-04T22:35:23.672210+00:00",
+      "ready_after_finalize_seconds": 17.931085557996994,
+      "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/2",
+      "upload_start_to_ready_seconds": 52.780333
+    },
+    "10000000000": {
+      "version": 3,
+      "planned_bytes": 10000000000,
+      "producer_run": {
+        "task_run_id": "2b9475a6-1621-509e-a496-43316fbb0297",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+        "source_version": 1,
+        "source_sha256": "c8e64831bab8d95911265e8f2ac45af804cdf6e0e8047af39e93b9a724e4cba1",
+        "provider_kernel_id": 142777129,
+        "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v3/1",
+        "started_at": "2026-11-04T22:35:25.398880Z"
+      },
+      "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+      "task_run_id": "2b9475a6-1621-509e-a496-43316fbb0297",
+      "actual_bytes": 10000000000,
+      "file_sha256": "0a358924d64897db55dc87f1789adbc31a34a7357157b2f27065f2bc17adad74",
+      "credential_free": true,
+      "generation_seconds": 51.697475714999996,
+      "upload_started_at": "2026-11-04T22:36:22.498504+00:00",
+      "upload_seconds": 211.11438632899996,
+      "http_status": 200,
+      "expected_files": [
+        [
+          "p3-payload.blob",
+          10000000000,
+          "{\"epoch\":1,\"file_sha256\":\"0a358924d64897db55dc87f1789adbc31a34a7357157b2f27065f2bc17adad74\",\"manifest_sha256\":\"6b87ab507c0073f8f127ec6e1f56cacfeff5cdd1ccb8992ba7f4c8a4873e92b0\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v3/1\",\"operation_id\":\"c554c960-c80e-532b-8525-295ca790879a\",\"total_bytes\":10000000000}"
+        ]
+      ],
+      "finalize_started_at": "2026-11-04T22:40:18.725650+00:00",
+      "finalizer_call_seconds": 124.03289714897983,
+      "finalizer_returned_at": "2026-11-04T22:42:22.760479+00:00",
+      "finalizer_ambiguous": true,
+      "dataset_status": {
+        "status": "ready",
+        "current_version_number": 3
+      },
+      "ready_at": "2026-11-04T22:42:44.641776+00:00",
+      "ready_after_finalize_seconds": 145.91423093999038,
+      "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/3",
+      "upload_start_to_ready_seconds": 382.143272
+    }
+  },
+  "postgres_recovery_tests": "not_run",
+  "product_card_recovery": "not_run",
+  "note": "Hashes in receipts are existing provider protocol fields, not new checksums or a proposed WAL manifest. Micro timings include MCP overhead and are not upload/ready SLA.",
+  "p3_control_evidence": {
+    "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+    "commit": "f7eb3c5f674b772751c815aa055a52f1f52e1828",
+    "sizes": [
+      100000000,
+      1000000000,
+      10000000000
+    ],
+    "deployed_http_test": false,
+    "started_at": "2026-11-04T22:25:14.153130+00:00",
+    "phase": "COMPLETE",
+    "updated_at": "2026-11-04T22:43:23.742854+00:00",
+    "dataset": "zigomaro/mdh-p3-5b1a3527200e",
+    "samples": [
+      {
+        "version": 1,
+        "planned_bytes": 100000000,
+        "producer_run": {
+          "task_run_id": "7bbc4c77-cfbf-5c9c-8b81-b620c2913e44",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+          "source_version": 1,
+          "source_sha256": "f87ce8f500b687626c718777cf1611236a70f7b7e707666afab07e601a490a00",
+          "provider_kernel_id": 142776272,
+          "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v1/1",
+          "started_at": "2026-11-04T22:25:17.153779Z"
+        },
+        "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "task_run_id": "7bbc4c77-cfbf-5c9c-8b81-b620c2913e44",
+        "actual_bytes": 100000000,
+        "file_sha256": "314544f9fbcdaf6760527b6a871c79793b32754c8cba60f912140fa118fba6b8",
+        "credential_free": true,
+        "generation_seconds": 0.843980208000005,
+        "upload_started_at": "2026-11-04T22:25:22.442866+00:00",
+        "upload_seconds": 3.6987744130000237,
+        "http_status": 200,
+        "expected_files": [
+          [
+            "p3-payload.blob",
+            100000000,
+            "{\"epoch\":1,\"file_sha256\":\"314544f9fbcdaf6760527b6a871c79793b32754c8cba60f912140fa118fba6b8\",\"manifest_sha256\":\"c4cbcf33b7f97defc739c9834695f808a7ae1d21e4bed7b9caf4f55ff575e2bb\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v1/1\",\"operation_id\":\"b20c7114-9e40-5a44-8557-67547a366ccf\",\"total_bytes\":100000000}"
+          ]
+        ],
+        "finalize_started_at": "2026-11-04T22:25:50.953008+00:00",
+        "finalizer_call_seconds": 13.865632089989958,
+        "finalizer_returned_at": "2026-11-04T22:26:04.821550+00:00",
+        "finalizer_ambiguous": false,
+        "dataset_status": {
+          "status": "ready",
+          "current_version_number": 1
+        },
+        "ready_at": "2026-11-04T22:26:05.059560+00:00",
+        "ready_after_finalize_seconds": 14.103678868996212,
+        "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/1",
+        "synthetic_creation_readback_started_at": "2026-11-04T22:26:05.066927+00:00",
+        "diagnostic_readback_observed_at": "2026-11-04T22:28:49.890071+00:00",
+        "diagnostic_readback_identity_path": "/home/dev/artifacts/my-data-hub/20261104T222445Z-storage-wal-preflight-20261104-5b1a3527/creation-identity.json",
+        "synthetic_creation_readback_seconds": null,
+        "upload_start_to_ready_seconds": 42.616694
+      },
+      {
+        "version": 2,
+        "planned_bytes": 1000000000,
+        "producer_run": {
+          "task_run_id": "0ca6a89d-2e14-53a5-b795-e10d205a6b63",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v2",
+          "source_version": 1,
+          "source_sha256": "7078800ae719ac209b46a6feced59f1aae62abd1213a1b8e21061bc19fd031ab",
+          "provider_kernel_id": 142777047,
+          "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v2/1",
+          "started_at": "2026-11-04T22:34:18.011025Z"
+        },
+        "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "task_run_id": "0ca6a89d-2e14-53a5-b795-e10d205a6b63",
+        "actual_bytes": 1000000000,
+        "file_sha256": "13ee442e77586b2c286e2488a0bd44f0d6bdb0369d17af3e93ba20a9ce5a78be",
+        "credential_free": true,
+        "generation_seconds": 9.364024230999973,
+        "upload_started_at": "2026-11-04T22:34:30.891877+00:00",
+        "upload_seconds": 10.33435259600003,
+        "http_status": 200,
+        "expected_files": [
+          [
+            "p3-payload.blob",
+            1000000000,
+            "{\"epoch\":1,\"file_sha256\":\"13ee442e77586b2c286e2488a0bd44f0d6bdb0369d17af3e93ba20a9ce5a78be\",\"manifest_sha256\":\"6f401332ef1a69f3949c5caafc3faa84a7fcad413fd3d173339ca276f9a85aaa\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v2/1\",\"operation_id\":\"f3f3875a-be25-528e-bc0e-ba30652108a3\",\"total_bytes\":1000000000}"
+          ]
+        ],
+        "finalize_started_at": "2026-11-04T22:35:05.739745+00:00",
+        "finalizer_call_seconds": 17.724196341994684,
+        "finalizer_returned_at": "2026-11-04T22:35:23.465360+00:00",
+        "finalizer_ambiguous": false,
+        "dataset_status": {
+          "status": "ready",
+          "current_version_number": 2
+        },
+        "ready_at": "2026-11-04T22:35:23.672210+00:00",
+        "ready_after_finalize_seconds": 17.931085557996994,
+        "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/2",
+        "upload_start_to_ready_seconds": 52.780333
+      },
+      {
+        "version": 3,
+        "planned_bytes": 10000000000,
+        "producer_run": {
+          "task_run_id": "2b9475a6-1621-509e-a496-43316fbb0297",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+          "source_version": 1,
+          "source_sha256": "c8e64831bab8d95911265e8f2ac45af804cdf6e0e8047af39e93b9a724e4cba1",
+          "provider_kernel_id": 142777129,
+          "provider_run_ref": "zigomaro/mdh-p3-5b1a3527200e-v3/1",
+          "started_at": "2026-11-04T22:35:25.398880Z"
+        },
+        "run_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "task_run_id": "2b9475a6-1621-509e-a496-43316fbb0297",
+        "actual_bytes": 10000000000,
+        "file_sha256": "0a358924d64897db55dc87f1789adbc31a34a7357157b2f27065f2bc17adad74",
+        "credential_free": true,
+        "generation_seconds": 51.697475714999996,
+        "upload_started_at": "2026-11-04T22:36:22.498504+00:00",
+        "upload_seconds": 211.11438632899996,
+        "http_status": 200,
+        "expected_files": [
+          [
+            "p3-payload.blob",
+            10000000000,
+            "{\"epoch\":1,\"file_sha256\":\"0a358924d64897db55dc87f1789adbc31a34a7357157b2f27065f2bc17adad74\",\"manifest_sha256\":\"6b87ab507c0073f8f127ec6e1f56cacfeff5cdd1ccb8992ba7f4c8a4873e92b0\",\"master_run_ref\":\"zigomaro/mdh-p3-5b1a3527200e-v3/1\",\"operation_id\":\"c554c960-c80e-532b-8525-295ca790879a\",\"total_bytes\":10000000000}"
+          ]
+        ],
+        "finalize_started_at": "2026-11-04T22:40:18.725650+00:00",
+        "finalizer_call_seconds": 124.03289714897983,
+        "finalizer_returned_at": "2026-11-04T22:42:22.760479+00:00",
+        "finalizer_ambiguous": true,
+        "dataset_status": {
+          "status": "ready",
+          "current_version_number": 3
+        },
+        "ready_at": "2026-11-04T22:42:44.641776+00:00",
+        "ready_after_finalize_seconds": 145.91423093999038,
+        "dataset_version_ref": "zigomaro/mdh-p3-5b1a3527200e/3",
+        "upload_start_to_ready_seconds": 382.143272
+      }
+    ],
+    "claims": [
+      {
+        "task_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "effect_id": "155cfb1d-d90d-5edd-918f-c35157235406",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+        "kind": "notebook",
+        "control_class": "mcp_managed",
+        "disposable": true,
+        "fingerprint": {
+          "algorithm": "sha256",
+          "value": "160ad1b2c1b0342ac356d8f5cdf325d3850e050709842380ec2ecd723f58a014"
+        },
+        "provider_version": 1,
+        "registered_at": "2026-11-04T22:25:15.440126Z",
+        "claim_sha256": "9a19d4d89a93dbce493eeee5bd89e1831563a43305c191512b5847617e296129"
+      },
+      {
+        "task_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "effect_id": "3ef56231-f7f1-55ef-a8b4-a03b88e144b6",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e",
+        "kind": "dataset",
+        "control_class": "mcp_managed",
+        "disposable": true,
+        "fingerprint": {
+          "algorithm": "sha256",
+          "value": "332b920a669ca3bc84abe2c59bae930b1c7fe7a329799e04ca6a5b27ef21865f"
+        },
+        "provider_version": 1,
+        "registered_at": "2026-11-04T22:25:50.932513Z",
+        "claim_sha256": "1d5f822093747262c912dfd14f3df7e93adb304184da7bf555ca3132f0c817ad"
+      },
+      {
+        "task_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "effect_id": "5d92a49b-bfc1-552c-a8bc-18e195a5d266",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v2",
+        "kind": "notebook",
+        "control_class": "mcp_managed",
+        "disposable": true,
+        "fingerprint": {
+          "algorithm": "sha256",
+          "value": "260408866904d3fb97e53184661764d69316813c55a09dc2915c75fc11e2e565"
+        },
+        "provider_version": 1,
+        "registered_at": "2026-11-04T22:34:16.500124Z",
+        "claim_sha256": "8e5a53f7e65f01397c9f450f9df467ae84f7ff2b012ee39453d5c7fa02c0b8ef"
+      },
+      {
+        "task_id": "5b1a3527-200e-4705-9a5f-912b7a7f9c3e",
+        "effect_id": "ffc8eab5-75ec-57e2-b182-85e7c0a70e2a",
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+        "kind": "notebook",
+        "control_class": "mcp_managed",
+        "disposable": true,
+        "fingerprint": {
+          "algorithm": "sha256",
+          "value": "21c97ceba66dab6dd65e860e28c1379997591cb203e2323ad1e10dd9ceb5477e"
+        },
+        "provider_version": 1,
+        "registered_at": "2026-11-04T22:35:23.792700Z",
+        "claim_sha256": "eb3d1dbf12e7c8c51573baa302b838aed590ca452e7419397e04d3af7cb6d239"
+      }
+    ],
+    "cleanup": [
+      {
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+        "seconds": 5.893889909988502,
+        "synthetic_readback_bytes": 0,
+        "receipt": {
+          "operation_id": "7cb9fd0d-757e-5f77-a93d-c967a582daa5",
+          "effect_id": "69efcf64-07a6-527d-a7ff-0176e254b7d7",
+          "action": "delete_notebook",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+          "outcome": "applied",
+          "attempts": 1,
+          "observed_fingerprint": null,
+          "provider_version": null,
+          "observed_at": "2026-11-04T22:42:50.544591Z",
+          "detail_code": "task_created_resource_absent"
+        }
+      },
+      {
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v2",
+        "seconds": 6.032094286027132,
+        "synthetic_readback_bytes": 0,
+        "receipt": {
+          "operation_id": "2c0d7eb2-0cff-5c30-9a0d-314d9922dd27",
+          "effect_id": "c6eca1e0-527a-5f2e-ba89-c09ddc176f5a",
+          "action": "delete_notebook",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v2",
+          "outcome": "applied",
+          "attempts": 1,
+          "observed_fingerprint": null,
+          "provider_version": null,
+          "observed_at": "2026-11-04T22:42:56.580823Z",
+          "detail_code": "task_created_resource_absent"
+        }
+      },
+      {
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e",
+        "seconds": 21.1754370330018,
+        "synthetic_readback_bytes": 100000000,
+        "receipt": {
+          "operation_id": "fd14406b-edc3-57f5-b2c4-01c5e39f0d3d",
+          "effect_id": "688c00a1-4eab-5a54-9f8e-5b3e05922ed9",
+          "action": "delete_dataset",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e",
+          "outcome": "applied",
+          "attempts": 1,
+          "observed_fingerprint": null,
+          "provider_version": null,
+          "observed_at": "2026-11-04T22:43:17.898194Z",
+          "detail_code": "task_created_resource_absent"
+        }
+      },
+      {
+        "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+        "seconds": 5.831838657002663,
+        "synthetic_readback_bytes": 0,
+        "receipt": {
+          "operation_id": "5855376f-25a1-5469-932b-0df09ee890a2",
+          "effect_id": "38716b87-e100-5031-aa95-07b473ccf040",
+          "action": "delete_notebook",
+          "provider_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+          "outcome": "applied",
+          "attempts": 1,
+          "observed_fingerprint": null,
+          "provider_version": null,
+          "observed_at": "2026-11-04T22:43:23.736043Z",
+          "detail_code": "task_created_resource_absent"
+        }
+      }
+    ],
+    "provider_identity": {
+      "username": "zigomaro",
+      "package": "kaggle",
+      "package_version": "2.2.4",
+      "authenticated": true
+    },
+    "version": 3,
+    "producer_ref": "zigomaro/mdh-p3-5b1a3527200e-v3",
+    "source_sha256": "c8e64831bab8d95911265e8f2ac45af804cdf6e0e8047af39e93b9a724e4cba1",
+    "expected_version": 3,
+    "continuation_started_at": "2026-11-04T22:34:16.221829+00:00",
+    "previous_failure": {
+      "phase": "CREATION_CLAIM_READBACK",
+      "error_type": "HTTPError"
+    },
+    "deleting_ref": "zigomaro/mdh-p3-5b1a3527200e-v1",
+    "completed_at": "2026-11-04T22:43:23.742832+00:00"
+  },
+  "p3_scope": "Synthetic transfer series complete; 100GB allocation, remaining private quota and version-history accounting unverified; production storage unchanged.",
+  "p4_scope": "Fresh CPU capacity observed; 12-hour duration and continuous scheduling quota not measured.",
+  "initial_settings": {
+    "archive_timeout_seconds": 300,
+    "wal_publish_interval_seconds": 900,
+    "online_base_trigger_publish_seconds": 180,
+    "status": "initial engineering settings; validate on actual WAL"
+  }
+}

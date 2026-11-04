@@ -24,13 +24,20 @@ one useful restored card before a shared framework. Use one notebook/lifecycle o
 ordinary PostgreSQL pending work, one model assessment and the official OpenCode
 installer at startup. Preserve existing MCP security and single-writer authority.
 
-The Dev-journal transfer in ADR-0020 is withdrawn for the pilot. Snapshot-only storage
-is a proposal with an explicitly unresolved owner decision about loss of the tail
-since the last Dataset snapshot. Do not infer owner acceptance from a forwarded audit.
-Do not add another checkpoint owner, release service or mandatory two-consumer rollout.
-The initial kaggle-runtime source snapshot is historical evidence; the package is not
-a prerequisite for the first useful card. Extract common code when an actual second
-consumer needs it, and preserve the owner's cross-project reuse requirement.
+The owner-approved storage contract is
+[`STORAGE-BASE-WAL.md`](docs/implementation/regional-novelty/STORAGE-BASE-WAL.md):
+compressed physical bases in the main private Dataset, native PostgreSQL WAL in a
+temporary Dataset, one publisher, long Kaggle sessions, no Dev data journal.
+The storage decision is closed; snapshot-only and logical pg_restore are superseded.
+Design for the ~100 GB target now; do not introduce a different pilot storage path.
+Keep the existing PostgreSQL 18.4 / pgvector 0.8.6 runtime consistent across save and
+restore. Preserve physical restore before PG start. Complete the documented live
+storage preflight before production storage changes; do not relabel probes as product
+acceptance or bypass existing provider authority to run them.
+ADR-0020 remains a withdrawn Dev-journal proposal. Do not add another checkpoint
+owner, release service or mandatory two-consumer rollout. The initial kaggle-runtime
+source snapshot is historical evidence; extract shared code when a second consumer
+actually needs it, preserving the owner's cross-project reuse requirement.
 
 ## Hard invariants
 
