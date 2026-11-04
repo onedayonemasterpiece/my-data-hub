@@ -424,18 +424,21 @@ class VoiceIntakeV2Store:
                 status_message=(
                     "Gemini временно недоступен. Аудио сохранено, сервер повторит автоматически."
                     if retry_pending and row["error_code"] in {
-                        "provider_unavailable", "provider_rejected_request"
+                        "provider_unavailable", "provider_rejected_request",
+                        "provider_timeout", "provider_network_error"
                     } else None
                 ),
                 retry_at=(
                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["retry_at"]))
                     if row["retry_at"] is not None else None
                 ),
-                # Installed Android clients classify the legacy schema code as
+                # Installed Android clients classify legacy failure codes as
                 # manual reconciliation before looking at retryable=true.
                 error_code=(
                     "provider_output_retry_pending"
-                    if row["error_code"] == "response_schema_invalid" and row["retryable"]
+                    if row["error_code"] in {
+                        "response_schema_invalid", "provider_timeout", "provider_network_error"
+                    } and row["retryable"]
                     and not row["reconciliation_required"] else row["error_code"]
                 ),
                 reconciliation_required=bool(row["reconciliation_required"]),
@@ -605,12 +608,14 @@ class VoiceIntakeV2Store:
     def consecutive_unavailable(self, session_id: str, stage: str) -> int:
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT http_status FROM inference_failures WHERE session_id=? AND stage=?
+                """SELECT http_status,code FROM inference_failures WHERE session_id=? AND stage=?
                    ORDER BY created_at DESC,request_uid DESC""", (session_id, stage),
             )
             count = 0
             for row in rows:
-                if row[0] is None or not 500 <= row[0] < 600:
+                if row["code"] not in {"provider_timeout", "provider_network_error"} and (
+                    row["http_status"] is None or not 500 <= row["http_status"] < 600
+                ):
                     break
                 count += 1
             return count

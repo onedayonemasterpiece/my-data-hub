@@ -140,7 +140,7 @@ async def test_provider_429_makes_one_physical_post_and_no_hidden_retry(
 
 
 @pytest.mark.asyncio
-async def test_provider_timeout_makes_one_physical_post_and_fences_ambiguity(
+async def test_provider_timeout_makes_one_physical_post_and_schedules_durable_retry(
     tmp_path, auth_settings, terminology
 ):
     class TimeoutRequester(Requester):
@@ -155,7 +155,7 @@ async def test_provider_timeout_makes_one_physical_post_and_fences_ambiguity(
     with pytest.raises(StageFailure) as raised:
         await service.transcribe(audio_path=audio, recorded_audio_ms=20_000, terminology=terminology)
     assert raised.value.code == "provider_timeout"
-    assert raised.value.sent and raised.value.ambiguous and not raised.value.retryable
+    assert raised.value.sent and raised.value.retryable and not raised.value.ambiguous
     assert len(requester.calls) == 1
     assert len(limiter.sent) == 1 and len(limiter.finalized) == 1
 
