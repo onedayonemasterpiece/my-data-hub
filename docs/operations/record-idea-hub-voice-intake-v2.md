@@ -162,8 +162,12 @@ preflight
 
 Transcription reserve is `recorded_audio_seconds * 32`, not wall duration and
 not full model TPM. Pre-send quota denial makes zero provider POSTs. After
-`mark_sent`, there is no hidden retry inside the provider adapter: timeout or
-another ambiguous outcome enters `reconciliation_required`. A definitively
+`mark_sent`, there is no hidden retry inside the provider adapter. Timeout or
+network failure during read-only generation uses the existing durable retry
+schedule without an attempt-count cutoff; no person or Codex is needed. A lost
+response may repeat provider computation, while publication retains its own
+idempotent transaction/readback. Transport outages count toward the existing
+allowed-model rotation, and completed inference stages are reused. A definitively
 received but malformed, truncated, or `RECITATION` response is not ambiguous;
 the worker may schedule another attempt, up to three malformed-output failures
 per stage. HTTP outages do not consume that budget. Safety and policy blocks

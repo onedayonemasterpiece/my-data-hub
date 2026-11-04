@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -97,20 +98,38 @@ async def test_permanent_http_failure_is_not_retried(
 
 
 @pytest.mark.asyncio
-async def test_html_503_is_definite_but_timeout_still_fences(
-    tmp_path, create_request, complete_request, terminology, auth_settings
+@pytest.mark.parametrize("stage", ["transcript", "summary"])
+async def test_transport_outage_continues_after_restart_until_published(
+    tmp_path, create_request, complete_request, terminology, auth_settings, stage
 ):
-    store, now, requester, _, worker, _ = harness(
-        tmp_path, create_request, complete_request, terminology, auth_settings,
-        [BoundedHTTPError("malformed_json", status=503), BoundedHTTPError("timeout")])
+    auth_settings = replace(auth_settings, allowed_models=(
+        auth_settings.model, "gemini-3.5-flash-lite"))
+    failures = [BoundedHTTPError("malformed_json", status=503),
+                BoundedHTTPError("timeout"), BoundedHTTPError("connection_error")] * 3
+    responses = ([200] if stage == "summary" else []) + failures + [200] * (2 if stage == "transcript" else 1)
+    store, now, requester, limiter, worker, publisher = harness(
+        tmp_path, create_request, complete_request, terminology, auth_settings, responses)
+    for index in range(len(failures)):
+        assert await worker.process_once()
+        status = store.status(SESSION_ID)
+        assert status.retryable and not status.reconciliation_required
+        assert status.error_code not in {"provider_timeout", "provider_network_error"}
+        assert status.status_message and status.retry_after_seconds > 0
+        assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
+        assert not await worker.process_once()
+        worker.store = VoiceIntakeV2Store(store.root, clock=lambda: now[0])
+        assert worker.store.consecutive_unavailable(SESSION_ID, stage) == index + 1
+        expected_model = auth_settings.allowed_models[(index // 3) % 2]
+        assert limiter.reserves[-1]["model"] == expected_model
+        now[0] += 901
     assert await worker.process_once()
-    assert store.status(SESSION_ID).retryable
-    now[0] += 61
-    assert await worker.process_once()
-    assert store.status(SESSION_ID).reconciliation_required
-    now[0] += 86400
-    assert not await worker.process_once()
-    assert len(requester.calls) == 2
+    assert store.status(SESSION_ID).state == "published_verified"
+    assert len(requester.calls) == len(failures) + 2
+    assert len(limiter.finalized) == len(requester.calls)
+    assert len({r["request_uid"] for r in limiter.reserves}) == len(requester.calls)
+    assert len(publisher.projections) == 1
+    if stage == "summary":
+        assert sum(len(c["json_body"]["contents"][0]["parts"]) == 2 for c in requester.calls) == 1
 
 
 @pytest.mark.asyncio

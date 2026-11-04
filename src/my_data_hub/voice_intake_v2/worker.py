@@ -296,7 +296,7 @@ class VoiceIntakeV2Worker:
             return self.inference
         failures = self.store.consecutive_unavailable(session_id, stage)
         selected: AggregateInference = select(failures)
-        LOGGER.info("voice_v2_provider_selected session_id=%s stage=%s model=%s consecutive_5xx=%s",
+        LOGGER.info("voice_v2_provider_selected session_id=%s stage=%s model=%s consecutive_unavailable=%s",
                     session_id, stage, getattr(getattr(selected, "settings", None), "model", None), failures)
         return selected
 

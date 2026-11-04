@@ -81,7 +81,7 @@ class AggregateGeminiInference:
         self.clock = clock
 
     def for_failures(self, consecutive_unavailable: int) -> AggregateGeminiInference:
-        """Rotate only explicitly allowed Lite models after definite outages."""
+        """Rotate only explicitly allowed Lite models after transient outages."""
         models = (self.settings.model, *(
             model for model in self.settings.allowed_models if model != self.settings.model
         ))
@@ -251,11 +251,17 @@ class AggregateGeminiInference:
                 )
                 await self._record_failure(checkpoint, failure, lease, started, usage)
                 raise failure from exc
-            await self._finalize(lease, started, usage, "failed", "provider_outcome_ambiguous")
-            raise StageFailure(
-                "provider_timeout" if "timeout" in str(exc).lower() else "provider_network_error",
-                sent=True, retryable=False, ambiguous=True, request_uid=request_uid,
-            ) from exc
+            # Generation has no product side effects. A missing response can
+            # repeat provider computation, but publication still uses its own
+            # idempotent receipt. Keep transient transport failures in the
+            # existing durable retry/accounting path instead of waiting for a person.
+            failure = StageFailure(
+                "provider_timeout" if isinstance(exc, TimeoutError) or "timeout" in str(exc).lower()
+                else "provider_network_error",
+                sent=True, retryable=True, request_uid=request_uid,
+            )
+            await self._record_failure(checkpoint, failure, lease, started, usage)
+            raise failure from exc
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
             failure = StageFailure(
                 "response_schema_invalid",
