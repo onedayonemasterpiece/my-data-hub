@@ -25,6 +25,8 @@
 
 Supporting architecture documents:
 
+- [`architecture/regional-monitoring-shared-kaggle-runtime-20261104.md`](architecture/regional-monitoring-shared-kaggle-runtime-20261104.md) —
+  proposed analysis of regional monitoring, shared Kaggle/WSS runtime and continuous OpenCode freshness; source-backed findings, not an accepted ADR or deployment claim.
 - [`architecture/system-context.md`](architecture/system-context.md)
 - [`architecture/component-model.md`](architecture/component-model.md)
 - [`architecture/data-ownership.md`](architecture/data-ownership.md)
