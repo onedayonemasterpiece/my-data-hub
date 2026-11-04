@@ -1,3 +1,5 @@
+> **Продолжение от 04.11.2026:** владелец ответил на вопросы этого исследования и поручил начать реализацию. Актуальная точка входа — [пакет для аудита Opus](../implementation/regional-novelty/OPUS-AUDIT.md), [принятые решения](../implementation/regional-novelty/owner-decisions.md) и [проект реализации](../implementation/regional-novelty/implementation-plan.md). Вопросы раздела 11 ниже больше не являются открытыми. Точный разбор долговечности РКБ и реализованный первый shared-code slice находятся в новом пакете. Исходный отчёт далее сохранён без переписывания истории.
+
 ---
 schema_version: 1
 idea_id: research-20261104-my-data-hub-shared-kaggle-runtime

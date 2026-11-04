@@ -1,5 +1,13 @@
 # Documentation index
 
+## Current implementation: regional novelty and shared Kaggle runtime
+
+- **[Start the Opus audit here](implementation/regional-novelty/OPUS-AUDIT.md)** — self-contained reading route for an auditor with access only to My Data Hub and RKB; includes the full shared source snapshot and evidence from other private projects.
+- [Owner decisions, 2026-11-04](implementation/regional-novelty/owner-decisions.md) — significant regional novelty first, free-quota stop/fresh execution, RKB Dataset durability and no external backup platform.
+- [Implementation project](implementation/regional-novelty/implementation-plan.md) and [concrete product modules/API/migrations](implementation/regional-novelty/novelty-implementation.md).
+- [Proposed ADR-0020](adr/0020-shared-runtime-regional-monitoring.md) — bounded noncanonical recovery journal while preserving the single Kaggle PostgreSQL authority.
+- Shared upstream: [kaggle-runtime](https://github.com/onedayonemasterpiece/kaggle-runtime). The initial pure-code slice is committed and locally tested; provider/WSS integration and a live novelty product remain implementation work.
+
 ## Authority and product
 
 - [`00-source-of-truth.md`](00-source-of-truth.md)

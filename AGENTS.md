@@ -15,6 +15,20 @@ this order but does not outrank the exact imported source.
 `my-data-hub` is the final name; `content-platform` is its historical alias. Never edit
 the exact imported source to make derived decisions appear consistent.
 
+## Current owner-directed implementation
+
+For the regional novelty/shared runtime work, start with
+[`docs/implementation/regional-novelty/OPUS-AUDIT.md`](docs/implementation/regional-novelty/OPUS-AUDIT.md)
+and its owner decisions. The packet contains exact external-project evidence and a
+documentation-only shared source snapshot for auditors with access to this repo and
+RKB only. Use `onedayonemasterpiece/kaggle-runtime` as the executable upstream; do not
+turn the snapshot into another maintained fork.
+
+The owner selected RKB-style durability and quota-driven fresh executors. ADR-0020
+records the engineering reconciliation for bounded exact recovery payload on Dev;
+it does not authorize canonical PostgreSQL/PGDATA on Dev or declare unimplemented
+runtime paths ready. Do not repeat resolved SQL/backup/product-priority questions.
+
 ## Hard invariants
 
 - PostgreSQL is the only canonical server-side database engine.

@@ -25,6 +25,30 @@ PostgreSQL conflicted with the source; they were not a refinement.
 ADR-0016 preserves the correction. `architecture/invariants.yaml` makes it executable.
 ADR-0009 remains as historical evidence with superseded status.
 
+## Regional monitoring owner decisions (2026-11-04)
+
+The current [owner decisions](implementation/regional-novelty/owner-decisions.md)
+choose significant regional novelty as the first new product, a fresh Kaggle executor
+after eligible free-model exhaustion, continuously current OpenCode and RKB-style
+Dataset durability. SQL and migrations are implementation responsibilities. External
+backup copies are outside this delivery. The active database target is below 100 GB;
+that target is not evidence of current checkpoint/restore capacity.
+
+The [implementation/audit packet](implementation/regional-novelty/OPUS-AUDIT.md)
+materializes those decisions and includes sources unavailable to the auditor.
+The shared upstream is `onedayonemasterpiece/kaggle-runtime`, initial source commit
+`52644f2748b602f54304e56424eee720d12a691b`; its pure primitives are not yet a live
+provider/WSS/OpenCode integration.
+
+RKB actually retains exact command/outcome bytes in a bounded Dev recovery journal.
+[Proposed ADR-0020](adr/0020-shared-runtime-regional-monitoring.md) explicitly
+reconciles this with the current metadata-only implementation description below:
+the planned journal is noncanonical replay state, never PGDATA, a second query
+corpus or a replacement database authority. Product direction is authorized;
+the implementation must make the corresponding schema, documentation and checks
+consistent while preserving canonical-data prohibitions. This source-only packet
+does not claim that the new recovery profile is already installed.
+
 ## Canonical boundaries
 
 - PostgreSQL is the canonical database engine; the ACTIVE runtime is the Kaggle master
